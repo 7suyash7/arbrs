@@ -3,9 +3,11 @@ use crate::errors::ArbRsError;
 use alloy_primitives::{Address, U256};
 use alloy_provider::Provider;
 use async_trait::async_trait;
+use std::any::Any;
 use std::fmt::Debug;
 use std::sync::Arc;
 
+pub mod strategy;
 pub mod uniswap_v2;
 
 #[async_trait]
@@ -40,4 +42,7 @@ pub trait LiquidityPool<P: Provider + Send + Sync + 'static + ?Sized>: Debug + S
     /// Calculates the "absolute price" of token0 in terms of token1, without decimal scaling.
     /// Price a_to_b = reserve_b / reserve_a
     async fn absolute_price(&self) -> Result<f64, ArbRsError>;
+
+    /// Downcasting methjod
+    fn as_any(&self) -> &dyn Any;
 }

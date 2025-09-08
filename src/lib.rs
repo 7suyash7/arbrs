@@ -1,4 +1,5 @@
 pub mod core;
+pub mod dex;
 pub mod errors;
 pub mod manager;
 pub mod pool;
