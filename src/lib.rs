@@ -1,6 +1,7 @@
 pub mod core;
 pub mod errors;
 pub mod manager;
+pub mod pool;
 
 pub use errors::ArbRsError;
 

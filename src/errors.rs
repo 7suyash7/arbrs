@@ -14,4 +14,7 @@ pub enum ArbRsError {
 
     #[error("Could not fetch required data for address: {0}")]
     DataFetchError(Address),
+
+    #[error("Pool calculation error: {0}")]
+    CalculationError(String),
 }

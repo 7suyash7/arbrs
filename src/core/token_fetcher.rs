@@ -3,7 +3,7 @@ use crate::errors::ArbRsError;
 use alloy_primitives::{Address, B256, Bytes, TxKind};
 use alloy_provider::Provider;
 use alloy_rpc_types::TransactionRequest;
-use alloy_sol_types::{sol, SolCall};
+use alloy_sol_types::{SolCall, sol};
 use std::sync::Arc;
 
 // ABI defs
@@ -32,7 +32,8 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> TokenFetcher<P> {
         );
 
         let decimals = decimals_res?;
-        let symbol = symbol_res.unwrap_or_else(|| format!("UNKNOWN@{}", address_to_short_string(address)));
+        let symbol =
+            symbol_res.unwrap_or_else(|| format!("UNKNOWN@{}", address_to_short_string(address)));
         let name = name_res.unwrap_or_else(|| "Unknown Token".to_string());
 
         Ok(Erc20Data::new(
@@ -82,7 +83,7 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> TokenFetcher<P> {
                 if let Ok(decoded_bytes) = symbol_bytes32Call::abi_decode_returns(&result_bytes) {
                     let symbol = bytes32_to_string(&decoded_bytes);
                     if !symbol.is_empty() {
-                         println!("[{address}] Decoded as bytes32: \"{symbol}\"");
+                        println!("[{address}] Decoded as bytes32: \"{symbol}\"");
                         return Some(symbol);
                     }
                 }
@@ -120,7 +121,7 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> TokenFetcher<P> {
                 if let Ok(decoded_bytes) = name_bytes32Call::abi_decode_returns(&result_bytes) {
                     let name = bytes32_to_string(&decoded_bytes);
                     if !name.is_empty() {
-                         println!("[{address}] Decoded as bytes32: \"{name}\"");
+                        println!("[{address}] Decoded as bytes32: \"{name}\"");
                         return Some(name);
                     }
                 }

@@ -141,7 +141,8 @@ pub struct Erc20Data<P: ?Sized> {
     provider: Arc<P>,
     balances: Arc<Mutex<HashMap<Address, Arc<Mutex<LruCache<u64, U256>>>>>>,
     total_supply_cache: Arc<Mutex<LruCache<u64, U256>>>,
-    allowance_cache: Arc<Mutex<HashMap<Address, HashMap<Address, Arc<Mutex<LruCache<u64, U256>>>>>>>,
+    allowance_cache:
+        Arc<Mutex<HashMap<Address, HashMap<Address, Arc<Mutex<LruCache<u64, U256>>>>>>>,
 }
 
 impl<P: ?Sized> Debug for Erc20Data<P> {
@@ -170,7 +171,9 @@ impl<P: Provider + Send + Sync + ?Sized> Erc20Data<P> {
             decimals,
             provider,
             balances: Arc::new(Mutex::new(HashMap::new())),
-             total_supply_cache: Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(BALANCE_CACHE_SIZE).unwrap()))),
+            total_supply_cache: Arc::new(Mutex::new(LruCache::new(
+                NonZeroUsize::new(BALANCE_CACHE_SIZE).unwrap(),
+            ))),
             allowance_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -251,81 +254,105 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> TokenLike for Erc20Data<P> {
     }
 
     async fn get_total_supply(&self, block_number: Option<u64>) -> Result<U256, ArbRsError> {
-    let block_for_call: BlockId = match block_number {
-        Some(num) => BlockNumberOrTag::Number(num).into(),
-        None => BlockNumberOrTag::Latest.into(),
-    };
-    let block_for_cache = if let Some(num) = block_number {
-        num
-    } else {
-        self.provider.get_block_number().await.map_err(|e| ArbRsError::ProviderError(e.to_string()))?
-    };
+        let block_for_call: BlockId = match block_number {
+            Some(num) => BlockNumberOrTag::Number(num).into(),
+            None => BlockNumberOrTag::Latest.into(),
+        };
+        let block_for_cache = if let Some(num) = block_number {
+            num
+        } else {
+            self.provider
+                .get_block_number()
+                .await
+                .map_err(|e| ArbRsError::ProviderError(e.to_string()))?
+        };
 
-    {
-        let mut cache = self.total_supply_cache.lock().await;
-        if let Some(supply) = cache.get(&block_for_cache) {
-            return Ok(*supply);
+        {
+            let mut cache = self.total_supply_cache.lock().await;
+            if let Some(supply) = cache.get(&block_for_cache) {
+                return Ok(*supply);
+            }
         }
+
+        let call = totalSupplyCall {};
+        let request = TransactionRequest {
+            to: Some(TxKind::Call(self.address)),
+            input: Some(Bytes::from(call.abi_encode())).into(),
+            ..Default::default()
+        };
+        let result_bytes = self
+            .provider
+            .call(request)
+            .block(block_for_call)
+            .await
+            .map_err(|e| ArbRsError::ProviderError(e.to_string()))?;
+        let total_supply = totalSupplyCall::abi_decode_returns(&result_bytes)
+            .map_err(|e| ArbRsError::AbiDecodeError(e.to_string()))?;
+
+        self.total_supply_cache
+            .lock()
+            .await
+            .put(block_for_cache, total_supply);
+        Ok(total_supply)
     }
 
-    let call = totalSupplyCall {};
-    let request = TransactionRequest {
-        to: Some(TxKind::Call(self.address)),
-        input: Some(Bytes::from(call.abi_encode())).into(),
-        ..Default::default()
-    };
-    let result_bytes = self.provider.call(request).block(block_for_call).await
-        .map_err(|e| ArbRsError::ProviderError(e.to_string()))?;
-    let total_supply = totalSupplyCall::abi_decode_returns(&result_bytes)
-        .map_err(|e| ArbRsError::AbiDecodeError(e.to_string()))?;
+    async fn get_allowance(
+        &self,
+        owner: Address,
+        spender: Address,
+        block_number: Option<u64>,
+    ) -> Result<U256, ArbRsError> {
+        let block_for_call: BlockId = match block_number {
+            Some(num) => BlockNumberOrTag::Number(num).into(),
+            None => BlockNumberOrTag::Latest.into(),
+        };
+        let block_for_cache = if let Some(num) = block_number {
+            num
+        } else {
+            self.provider
+                .get_block_number()
+                .await
+                .map_err(|e| ArbRsError::ProviderError(e.to_string()))?
+        };
 
-    self.total_supply_cache.lock().await.put(block_for_cache, total_supply);
-    Ok(total_supply)
-}
-
-async fn get_allowance(
-    &self,
-    owner: Address,
-    spender: Address,
-    block_number: Option<u64>,
-) -> Result<U256, ArbRsError> {
-    let block_for_call: BlockId = match block_number {
-        Some(num) => BlockNumberOrTag::Number(num).into(),
-        None => BlockNumberOrTag::Latest.into(),
-    };
-    let block_for_cache = if let Some(num) = block_number {
-        num
-    } else {
-        self.provider.get_block_number().await.map_err(|e| ArbRsError::ProviderError(e.to_string()))?
-    };
-
-    let spender_cache = {
-        let mut owner_map = self.allowance_cache.lock().await;
-        owner_map.entry(owner).or_insert_with(HashMap::new)
-            .entry(spender).or_insert_with(|| Arc::new(Mutex::new(LruCache::new(NonZeroUsize::new(BALANCE_CACHE_SIZE).unwrap()))))
-            .clone()
-    };
-    {
-        let mut cache = spender_cache.lock().await;
-        if let Some(allowance) = cache.get(&block_for_cache) {
-            return Ok(*allowance);
+        let spender_cache = {
+            let mut owner_map = self.allowance_cache.lock().await;
+            owner_map
+                .entry(owner)
+                .or_insert_with(HashMap::new)
+                .entry(spender)
+                .or_insert_with(|| {
+                    Arc::new(Mutex::new(LruCache::new(
+                        NonZeroUsize::new(BALANCE_CACHE_SIZE).unwrap(),
+                    )))
+                })
+                .clone()
+        };
+        {
+            let mut cache = spender_cache.lock().await;
+            if let Some(allowance) = cache.get(&block_for_cache) {
+                return Ok(*allowance);
+            }
         }
+
+        let call = allowanceCall { owner, spender };
+        let request = TransactionRequest {
+            to: Some(TxKind::Call(self.address)),
+            input: Some(Bytes::from(call.abi_encode())).into(),
+            ..Default::default()
+        };
+        let result_bytes = self
+            .provider
+            .call(request)
+            .block(block_for_call)
+            .await
+            .map_err(|e| ArbRsError::ProviderError(e.to_string()))?;
+        let allowance = allowanceCall::abi_decode_returns(&result_bytes)
+            .map_err(|e| ArbRsError::AbiDecodeError(e.to_string()))?;
+
+        spender_cache.lock().await.put(block_for_cache, allowance);
+        Ok(allowance)
     }
-
-    let call = allowanceCall { owner, spender };
-    let request = TransactionRequest {
-        to: Some(TxKind::Call(self.address)),
-        input: Some(Bytes::from(call.abi_encode())).into(),
-        ..Default::default()
-    };
-    let result_bytes = self.provider.call(request).block(block_for_call).await
-        .map_err(|e| ArbRsError::ProviderError(e.to_string()))?;
-    let allowance = allowanceCall::abi_decode_returns(&result_bytes)
-        .map_err(|e| ArbRsError::AbiDecodeError(e.to_string()))?;
-
-    spender_cache.lock().await.put(block_for_cache, allowance);
-    Ok(allowance)
-}
 }
 
 // Wrapper Enum
@@ -415,8 +442,10 @@ impl<P: ?Sized> Debug for Token<P> {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         match self {
             Token::Erc20(data) => f.debug_tuple("Token::Erc20").field(&data.address).finish(),
-            Token::Native(data) => f.debug_tuple("Token::Native").field(&data.placeholder_address).finish(),
+            Token::Native(data) => f
+                .debug_tuple("Token::Native")
+                .field(&data.placeholder_address)
+                .finish(),
         }
     }
 }
-

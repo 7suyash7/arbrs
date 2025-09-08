@@ -1,7 +1,7 @@
+use alloy_primitives::{Address, U256, address};
+use alloy_provider::{Provider, ProviderBuilder};
 use arbrs::core::token::TokenLike;
 use arbrs::manager::token_manager::TokenManager;
-use alloy_primitives::{address, Address, U256};
-use alloy_provider::{Provider, ProviderBuilder};
 use std::sync::Arc;
 use url::Url;
 
@@ -41,17 +41,34 @@ async fn test_get_balance_and_total_supply() {
     let balance_result = weth_token.get_balance(VITALIK_ADDRESS, None).await;
     let total_supply_result = weth_token.get_total_supply(None).await;
 
-    assert!(balance_result.is_ok(), "Balance fetch failed: {:?}", balance_result.err());
-    assert!(total_supply_result.is_ok(), "Total supply fetch failed: {:?}", total_supply_result.err());
-    assert!(total_supply_result.unwrap() > U256::ZERO, "Total supply should be greater than zero");
+    assert!(
+        balance_result.is_ok(),
+        "Balance fetch failed: {:?}",
+        balance_result.err()
+    );
+    assert!(
+        total_supply_result.is_ok(),
+        "Total supply fetch failed: {:?}",
+        total_supply_result.err()
+    );
+    assert!(
+        total_supply_result.unwrap() > U256::ZERO,
+        "Total supply should be greater than zero"
+    );
 }
 
 #[tokio::test]
 async fn test_get_allowance() {
     let manager = setup_manager().await;
     let weth_token = manager.get_token(WETH_ADDRESS).await.unwrap();
-    let allowance_result = weth_token.get_allowance(VITALIK_ADDRESS, ROUTER_ADDRESS, None).await;
-    assert!(allowance_result.is_ok(), "Allowance fetch failed: {:?}", allowance_result.err());
+    let allowance_result = weth_token
+        .get_allowance(VITALIK_ADDRESS, ROUTER_ADDRESS, None)
+        .await;
+    assert!(
+        allowance_result.is_ok(),
+        "Allowance fetch failed: {:?}",
+        allowance_result.err()
+    );
 }
 
 #[tokio::test]
@@ -72,7 +89,10 @@ async fn test_native_ether_placeholder() {
     assert_eq!(eth_token.symbol(), "ETH");
     assert_eq!(eth_token.decimals(), 18);
 
-    let allowance = eth_token.get_allowance(VITALIK_ADDRESS, ROUTER_ADDRESS, None).await.unwrap();
+    let allowance = eth_token
+        .get_allowance(VITALIK_ADDRESS, ROUTER_ADDRESS, None)
+        .await
+        .unwrap();
     assert_eq!(allowance, U256::MAX);
 
     let balance = eth_token.get_balance(VITALIK_ADDRESS, None).await.unwrap();
