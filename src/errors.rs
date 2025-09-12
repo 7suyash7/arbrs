@@ -17,4 +17,7 @@ pub enum ArbRsError {
 
     #[error("Pool calculation error: {0}")]
     CalculationError(String),
+
+    #[error("Uniswap Calculation error: {0}")]
+    UniswapV3MathError(String),
 }
