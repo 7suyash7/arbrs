@@ -1,22 +1,17 @@
-// tests/uniswap_v2_test.rs
-
 use alloy_primitives::{Address, B256, U256, address, b256};
 use alloy_provider::{Provider, ProviderBuilder};
 use arbrs::core::token::TokenLike;
 use arbrs::dex::DexVariant;
 use arbrs::manager::pool_manager::PoolManager;
 use arbrs::manager::token_manager::TokenManager;
-// Import the strategies to be tested explicitly
 use arbrs::ArbRsError;
 use arbrs::pool::LiquidityPool;
 use arbrs::pool::strategy::{PancakeV2Logic, StandardV2Logic, V2CalculationStrategy};
 use arbrs::pool::uniswap_v2::{UniswapV2Pool, UniswapV2PoolState};
-use std::any::Any; // For downcasting
 use std::str::FromStr;
 use std::sync::Arc;
 use url::Url;
 
-// --- Constants ---
 const WETH_ADDRESS: Address = address!("C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2");
 const WBTC_ADDRESS: Address = address!("2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599");
 const USDC_ADDRESS: Address = address!("A0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
@@ -31,10 +26,7 @@ const V2_INIT_HASH: B256 =
 const FORK_RPC_URL: &str = "http://127.0.0.1:8545";
 type DynProvider = dyn Provider + Send + Sync;
 
-// --- Helper Functions ---
-
 /// Generic setup function to create a V2 pool with a specific strategy, returning a concrete type.
-/// This allows us to call methods like `get_cached_reserves` which live on the concrete struct, not the trait.
 async fn setup_concrete_v2_pool<S: V2CalculationStrategy + Clone + 'static>(
     strategy: S,
     pool_address: Address,
@@ -49,7 +41,6 @@ async fn setup_concrete_v2_pool<S: V2CalculationStrategy + Clone + 'static>(
     let provider_arc: Arc<DynProvider> = Arc::new(provider);
     let manager = Arc::new(TokenManager::new(provider_arc.clone(), 1));
 
-    // Ensure token order for pool initializatio (token0 < token1)
     let token_a = manager.get_token(token_a_address).await.unwrap();
     let token_b = manager.get_token(token_b_address).await.unwrap();
     let (token0, token1) = if token_a.address() < token_b.address() {
@@ -70,7 +61,6 @@ async fn setup_concrete_v2_pool<S: V2CalculationStrategy + Clone + 'static>(
     (manager, pool)
 }
 
-/// Setup function for standard V2 pool tests, returning a dynamic trait object.
 async fn setup_standard_v2_pool() -> (
     Arc<TokenManager<DynProvider>>,
     Arc<dyn LiquidityPool<DynProvider>>,
@@ -85,7 +75,6 @@ async fn setup_standard_v2_pool() -> (
     (manager, pool as Arc<dyn LiquidityPool<DynProvider>>)
 }
 
-/// Setup function for the pool manager.
 async fn setup_pool_manager() -> PoolManager<DynProvider> {
     let url = Url::parse(FORK_RPC_URL).expect("Failed to parse RPC URL");
     let provider = ProviderBuilder::new().connect_http(url);
@@ -94,13 +83,11 @@ async fn setup_pool_manager() -> PoolManager<DynProvider> {
     PoolManager::new(token_manager, provider_arc)
 }
 
-// --- Tests ---
-
 #[tokio::test]
 async fn test_v2_calculate_tokens_out() {
     let (manager, pool) = setup_standard_v2_pool().await;
     let wbtc = manager.get_token(WBTC_ADDRESS).await.unwrap();
-    let amount_in = U256::from(8_000_000_000_u64); // 0.08 WBTC
+    let amount_in = U256::from(8_000_000_000_u64);
     let expected_amount_out = U256::from_str("847228560678214929944").unwrap();
 
     let amount_out = pool.calculate_tokens_out(&wbtc, amount_in).await.unwrap();
@@ -112,7 +99,7 @@ async fn test_v2_calculate_tokens_out() {
 async fn test_v2_calculate_tokens_in() {
     let (manager, pool) = setup_standard_v2_pool().await;
     let weth = manager.get_token(WETH_ADDRESS).await.unwrap();
-    let amount_out = U256::from_str("1200000000000000000000").unwrap(); // 1.2 WETH
+    let amount_out = U256::from_str("1200000000000000000000").unwrap();
     let expected_amount_in = U256::from(14_245_938_804_u64);
 
     let amount_in = pool
@@ -155,7 +142,7 @@ async fn test_v2_input_validation() {
 
 #[tokio::test]
 async fn test_v2_price_calculation() {
-    let (manager, pool) = setup_standard_v2_pool().await;
+    let (_manager, pool) = setup_standard_v2_pool().await;
     let (wbtc, weth) = pool.tokens();
 
     let nominal_price = pool.nominal_price().await.unwrap();
@@ -174,7 +161,6 @@ async fn test_v2_insufficient_liquidity_swap() {
     let (manager, pool) = setup_standard_v2_pool().await;
     let weth = manager.get_token(WETH_ADDRESS).await.unwrap();
 
-    // Downcast to access specific implementation details if necessary, like get_cached_reserves
     let concrete_pool = pool
         .as_any()
         .downcast_ref::<UniswapV2Pool<DynProvider, StandardV2Logic>>()
@@ -189,7 +175,6 @@ async fn test_v2_insufficient_liquidity_swap() {
         current_state.reserve1
     };
 
-    // Attempt to swap out more than or equal to the total reserve
     let result = pool
         .calculate_tokens_in_from_tokens_out(&weth, weth_reserve)
         .await;
@@ -228,7 +213,7 @@ async fn test_v2_state_override_calculation() {
     let wbtc = manager.get_token(WBTC_ADDRESS).await.unwrap();
     let weth = manager.get_token(WETH_ADDRESS).await.unwrap();
 
-    let amount_in = U256::from(100_000_000); // 1 WBTC satoshi
+    let amount_in = U256::from(100_000_000);
 
     let override_reserves = UniswapV2PoolState {
         reserve0: U256::from(2000) * U256::from(10).pow(U256::from(wbtc.decimals())),

@@ -3,14 +3,6 @@ use alloy_primitives::{U256, U512};
 /// Performs a multiplication and division in 512-bit precision.
 /// Equivalent to (a * b) / denominator.
 /// Reverts on division by zero or overflow.
-///
-/// # Arguments
-/// * `a`: First operand.
-/// * `b`: Second operand.
-/// * `denominator`: Denominator.
-///
-/// # Returns
-/// The result of (a * b) / denominator.
 pub fn mul_div(a: U256, b: U256, denominator: U256) -> Option<U256> {
     if denominator.is_zero() {
         return None;
@@ -29,14 +21,6 @@ pub fn mul_div(a: U256, b: U256, denominator: U256) -> Option<U256> {
 /// Performs a multiplication and division, rounding up.
 /// Equivalent to ceil((a * b) / denominator).
 /// Reverts on division by zero or overflow.
-///
-/// # Arguments
-/// * `a`: First operand.
-/// * `b`: Second operand.
-/// * `denominator`: Denominator.
-///
-/// # Returns
-/// The result of ceil((a * b) / denominator).
 pub fn mul_div_rounding_up(a: U256, b: U256, denominator: U256) -> Option<U256> {
     if denominator.is_zero() {
         return None;
@@ -62,17 +46,16 @@ pub fn mul_div_rounding_up(a: U256, b: U256, denominator: U256) -> Option<U256> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
     use alloy_primitives::U256;
 
     const Q128: U256 = U256::from_limbs([0, 0, 1, 0]);
 
     #[test]
     fn test_mul_div_reverts() {
-        // Reverts on division by zero
         assert_eq!(mul_div(Q128, U256::from(5), U256::ZERO), None);
         assert_eq!(mul_div(Q128, Q128, U256::ZERO), None);
-        
-        // Reverts on overflow
+
         assert_eq!(mul_div(Q128, Q128, U256::from(1)), None);
         assert_eq!(mul_div(U256::MAX, U256::MAX, U256::MAX - U256::from(1)), None);
     }
@@ -84,8 +67,8 @@ mod tests {
 
     #[test]
     fn test_mul_div_specific_cases() {
-        let half_q128 = Q128 / U256::from(2); // 0.5x
-        let one_and_a_half_q128 = Q128 * U256::from(3) / U256::from(2); // 1.5x
+        let half_q128 = Q128 / U256::from(2);
+        let one_and_a_half_q128 = Q128 * U256::from(3) / U256::from(2);
         assert_eq!(
             mul_div(Q128, half_q128, one_and_a_half_q128),
             Some(Q128 / U256::from(3))
@@ -117,21 +100,83 @@ mod tests {
     fn test_mul_div_rounding_up_specific_cases() {
         let half_q128 = Q128 / U256::from(2);
         let one_and_a_half_q128 = Q128 * U256::from(3) / U256::from(2);
-        // (1 * 0.5) / 1.5 = 1/3, rounds up
         assert_eq!(
             mul_div_rounding_up(Q128, half_q128, one_and_a_half_q128),
             Some(Q128 / U256::from(3) + U256::from(1))
         );
 
-        // (1 * 35) / 8 = 4.375, no rounding up needed for this precision
         assert_eq!(
             mul_div_rounding_up(Q128, Q128 * U256::from(35), Q128 * U256::from(8)),
             Some(Q128 * U256::from(4375) / U256::from(1000))
         );
 
-        // (1 * 1000) / 3000 = 1/3, rounds up
         assert_eq!(
             mul_div_rounding_up(Q128, Q128 * U256::from(1000), Q128 * U256::from(3000)),
+            Some(Q128 / U256::from(3) + U256::from(1))
+        );
+    }
+
+    #[test]
+    fn test_mul_div_failures() {
+        assert_eq!(mul_div(Q128, U256::from(5), U256::ZERO), None);
+        assert_eq!(mul_div(Q128, Q128, U256::ZERO), None);
+
+        assert_eq!(mul_div(Q128, Q128, U256::from(1)), None);
+        assert_eq!(
+            mul_div(U256::MAX, U256::MAX, U256::MAX - U256::from(1)),
+            None
+        );
+    }
+
+    #[test]
+    fn test_mul_div_successes() {
+        assert_eq!(mul_div(U256::MAX, U256::MAX, U256::MAX), Some(U256::MAX));
+
+        let half_q128 = Q128 / U256::from(2);
+        let one_and_a_half_q128 = Q128 * U256::from(3) / U256::from(2);
+        assert_eq!(
+            mul_div(Q128, half_q128, one_and_a_half_q128),
+            Some(Q128 / U256::from(3))
+        );
+
+        assert_eq!(
+            mul_div(Q128, Q128 * U256::from(35), Q128 * U256::from(8)),
+            Some(Q128 * U256::from(4375) / U256::from(1000))
+        );
+    }
+
+    #[test]
+    fn test_mul_div_rounding_up_failures() {
+        assert_eq!(
+            mul_div_rounding_up(Q128, U256::from(5), U256::ZERO),
+            None
+        );
+        assert_eq!(
+            mul_div_rounding_up(U256::MAX, U256::MAX, U256::MAX - U256::from(1)),
+            None
+        );
+    }
+
+    #[test]
+    fn test_mul_div_rounding_up_successes() {
+        assert_eq!(
+            mul_div_rounding_up(U256::MAX, U256::MAX, U256::MAX),
+            Some(U256::MAX)
+        );
+
+        let half_q128 = Q128 / U256::from(2);
+        let one_and_a_half_q128 = Q128 * U256::from(3) / U256::from(2);
+        assert_eq!(
+            mul_div_rounding_up(Q128, half_q128, one_and_a_half_q128),
+            Some(Q128 / U256::from(3) + U256::from(1))
+        );
+
+        assert_eq!(
+            mul_div_rounding_up(
+                Q128,
+                U256::from_str("1000").unwrap() * Q128,
+                U256::from_str("3000").unwrap() * Q128
+            ),
             Some(Q128 / U256::from(3) + U256::from(1))
         );
     }

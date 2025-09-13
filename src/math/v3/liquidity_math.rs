@@ -1,13 +1,11 @@
-use alloy_primitives::{U256, U512};
+use crate::math::v3::{constants::Q96, full_math};
+use alloy_primitives::U256;
 
 /// Adds a signed liquidity delta to an unsigned liquidity amount.
 pub fn add_delta(liquidity: u128, delta: i128) -> Option<u128> {
-    // FIX: Perform math directly on primitive types with checked operations.
-    // This is cleaner and avoids the complex I256 conversion issues.
     if delta >= 0 {
         liquidity.checked_add(delta as u128)
     } else {
-        // `unsigned_abs()` is the correct way to get the absolute value for subtraction.
         liquidity.checked_sub(delta.unsigned_abs())
     }
 }
@@ -23,19 +21,20 @@ pub fn get_liquidity_for_amount0(
         std::mem::swap(&mut sqrt_ratio_a_x96, &mut sqrt_ratio_b_x96);
     }
 
-    let numerator = amount0 << 96;
-    let denominator = sqrt_ratio_b_x96 - sqrt_ratio_a_x96;
+    let intermediate = full_math::mul_div(sqrt_ratio_a_x96, sqrt_ratio_b_x96, Q96)?;
+    let numerator = amount0.checked_mul(intermediate)?;
+    let denominator = sqrt_ratio_b_x96.checked_sub(sqrt_ratio_a_x96)?;
 
     if denominator.is_zero() {
         return None;
     }
+    
+    let liquidity = numerator.checked_div(denominator)?;
 
-    let ratio: U256 = numerator / denominator;
-
-    if ratio > U256::from(u128::MAX) {
+    if liquidity > U256::from(u128::MAX) {
         None
     } else {
-        Some(ratio.to::<u128>())
+        Some(liquidity.to::<u128>())
     }
 }
 
@@ -49,24 +48,20 @@ pub fn get_liquidity_for_amount1(
     if sqrt_ratio_a_x96 > sqrt_ratio_b_x96 {
         std::mem::swap(&mut sqrt_ratio_a_x96, &mut sqrt_ratio_b_x96);
     }
-
-    let numerator1: U256 = amount1 << 96;
-    let numerator2 = sqrt_ratio_b_x96 - sqrt_ratio_a_x96;
-
-    let product = numerator1.widening_mul(numerator2);
-    let denominator: U512 = sqrt_ratio_a_x96.widening_mul(sqrt_ratio_b_x96) >> 96;
+    
+    let numerator = amount1.checked_mul(Q96)?;
+    let denominator = sqrt_ratio_b_x96.checked_sub(sqrt_ratio_a_x96)?;
 
     if denominator.is_zero() {
         return None;
     }
+    
+    let liquidity = numerator.checked_div(denominator)?;
 
-    let ratio: U512 = product / denominator;
-
-    // FIX: Convert the U256 max value to a U512 for comparison.
-    if ratio > U512::from(U256::from(u128::MAX)) {
+    if liquidity > U256::from(u128::MAX) {
         None
     } else {
-        Some(ratio.to::<u128>())
+        Some(liquidity.to::<u128>())
     }
 }
 

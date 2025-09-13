@@ -253,7 +253,7 @@ impl<P: ?Sized, S: V2CalculationStrategy> Debug for UniswapV2Pool<P, S> {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         f.debug_struct("UniswapV2Pool")
             .field("address", &self.address)
-            .field("strategy", &self.strategy) // Updated debug output
+            .field("strategy", &self.strategy)
             .finish_non_exhaustive()
     }
 }

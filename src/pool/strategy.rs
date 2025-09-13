@@ -130,7 +130,7 @@ pub trait V2CalculationStrategy: Debug + Send + Sync {
     /// Returns the fee in basis points (bps). E.g., 30 bps for 0.3%.
     fn get_fee_bps(&self) -> u32;
 
-    // Optional: logic for complex forks like Camelot.
+    // logic for complex forks like Camelot.
     // fn custom_logic(&self) -> Result<(), ArbRsError> { Ok(()) }
 }
 

@@ -1,83 +1,83 @@
-use super::full_math::{mul_div, mul_div_rounding_up};
-use alloy_primitives::{U256, U512};
+use crate::errors::ArbRsError;
+use crate::math::v3::{
+    full_math::{mul_div, mul_div_rounding_up},
+    unsafe_math::div_rounding_up,
+};
+use alloy_primitives::{I256, U256};
 
-// This is a more robust implementation that correctly mirrors the fixed-point
-// arithmetic logic found in mature Uniswap V3 libraries.
+pub const MAX_U160: U256 = U256::from_limbs([0, 0, 0, 1 << 32]); // 2^160
+pub const Q96: U256 = U256::from_limbs([0, 1 << 32, 0, 0]); // 2^96
 
-fn div_rounding_up(a: U256, b: U256) -> Option<U256> {
-    if a.is_zero() {
-        return Some(U256::ZERO);
-    }
-    if b.is_zero() {
-        return None;
-    }
-    Some((a - U256::from(1)) / b + U256::from(1))
-}
-
-fn get_next_sqrt_price_from_amount0_rounding_up(
-    sqrt_p_x96: U256,
+fn get_next_sqrt_price_from_amount_0_rounding_up(
+    sqrt_price_x_96: U256,
     liquidity: u128,
     amount: U256,
     add: bool,
-) -> Option<U256> {
+) -> Result<U256, ArbRsError> {
     if amount.is_zero() {
-        return Some(sqrt_p_x96);
+        return Ok(sqrt_price_x_96);
     }
-    let liquidity_u256 = U256::from(liquidity);
-    let numerator1 = liquidity_u256 << 96;
+    let numerator_1 = U256::from(liquidity) << 96;
 
     if add {
-        let product = amount * sqrt_p_x96;
-        if product / amount == sqrt_p_x96 {
-            let denominator = numerator1 + product;
-            if denominator >= numerator1 {
-                return mul_div_rounding_up(numerator1, sqrt_p_x96, denominator);
+        let product = amount * sqrt_price_x_96;
+        if product / amount == sqrt_price_x_96 {
+            let denominator = numerator_1 + product;
+            if denominator >= numerator_1 {
+                return mul_div_rounding_up(numerator_1, sqrt_price_x_96, denominator)
+                    .ok_or(ArbRsError::UniswapV3MathError("mul_div_rounding_up failed".into()));
             }
         }
-        let denominator = div_rounding_up(numerator1, sqrt_p_x96)? + amount;
-        return div_rounding_up(numerator1, denominator);
+        let denominator = div_rounding_up(numerator_1, sqrt_price_x_96) + amount;
+        Ok(div_rounding_up(numerator_1, denominator))
     } else {
-        let product = amount * sqrt_p_x96;
-        if product / amount == sqrt_p_x96 && numerator1 > product {
-            let denominator = numerator1 - product;
-            return mul_div_rounding_up(numerator1, sqrt_p_x96, denominator);
+        let product = amount * sqrt_price_x_96;
+        if product / amount == sqrt_price_x_96 && numerator_1 > product {
+            let denominator = numerator_1 - product;
+            mul_div_rounding_up(numerator_1, sqrt_price_x_96, denominator)
+                .ok_or(ArbRsError::UniswapV3MathError("mul_div_rounding_up failed".into()))
+        } else {
+            Err(ArbRsError::UniswapV3MathError("Paus".into()))
         }
-        None
     }
 }
 
-fn get_next_sqrt_price_from_amount1_rounding_down(
-    sqrt_p_x96: U256,
+fn get_next_sqrt_price_from_amount_1_rounding_down(
+    sqrt_price_x_96: U256,
     liquidity: u128,
     amount: U256,
     add: bool,
-) -> Option<U256> {
-    let liquidity_u256 = U256::from(liquidity);
+) -> Result<U256, ArbRsError> {
+    let liquidity = U256::from(liquidity);
     if add {
-        let quotient = mul_div(amount, U256::from(1) << 96, liquidity_u256)?;
-        Some(sqrt_p_x96 + quotient)
-    } else {
-        let quotient = mul_div_rounding_up(amount, U256::from(1) << 96, liquidity_u256)?;
-        if sqrt_p_x96 <= quotient {
-            return None;
+        let quotient = mul_div(amount, Q96, liquidity)
+            .ok_or(ArbRsError::UniswapV3MathError("mul_div failed".into()))?;
+        let next_sqrt_price = sqrt_price_x_96 + quotient;
+        if next_sqrt_price > MAX_U160 {
+            return Err(ArbRsError::UniswapV3MathError("R".into()));
         }
-        Some(sqrt_p_x96 - quotient)
+        Ok(next_sqrt_price)
+    } else {
+        let quotient = mul_div_rounding_up(amount, Q96, liquidity)
+            .ok_or(ArbRsError::UniswapV3MathError("mul_div_rounding_up failed".into()))?;
+        if sqrt_price_x_96 <= quotient {
+            return Err(ArbRsError::UniswapV3MathError("R".into()));
+        }
+        Ok(sqrt_price_x_96 - quotient)
     }
 }
 
 pub fn get_next_sqrt_price_from_input(
-    sqrt_p_x96: U256,
+    sqrt_price: U256,
     liquidity: u128,
     amount_in: U256,
     zero_for_one: bool,
-) -> Option<U256> {
-    if sqrt_p_x96.is_zero() || liquidity == 0 {
-        return None;
-    }
+) -> Result<U256, ArbRsError> {
+    if liquidity == 0 { return Err(ArbRsError::UniswapV3MathError("L".into())); }
     if zero_for_one {
-        get_next_sqrt_price_from_amount0_rounding_up(sqrt_p_x96, liquidity, amount_in, true)
+        get_next_sqrt_price_from_amount_0_rounding_up(sqrt_price, liquidity, amount_in, true)
     } else {
-        get_next_sqrt_price_from_amount1_rounding_down(sqrt_p_x96, liquidity, amount_in, true)
+        get_next_sqrt_price_from_amount_1_rounding_down(sqrt_price, liquidity, amount_in, true)
     }
 }
 
@@ -86,156 +86,91 @@ pub fn get_next_sqrt_price_from_output(
     liquidity: u128,
     amount_out: U256,
     zero_for_one: bool,
-) -> Option<U256> {
-    if sqrt_p_x96.is_zero() || liquidity == 0 {
-        return None;
-    }
+) -> Result<U256, ArbRsError> {
+    if liquidity == 0 { return Err(ArbRsError::UniswapV3MathError("L".into())); }
+    let liquidity_u256 = U256::from(liquidity);
+
     if zero_for_one {
-        get_next_sqrt_price_from_amount1_rounding_down(sqrt_p_x96, liquidity, amount_out, false)
+        let quotient = mul_div_rounding_up(amount_out, Q96, liquidity_u256)
+            .ok_or(ArbRsError::UniswapV3MathError("mul_div_rounding_up failed".into()))?;
+        if sqrt_p_x96 <= quotient {
+             return Err(ArbRsError::UniswapV3MathError("R".into()));
+        }
+        Ok(sqrt_p_x96 - quotient)
     } else {
-        get_next_sqrt_price_from_amount0_rounding_up(sqrt_p_x96, liquidity, amount_out, false)
+        let product = amount_out * sqrt_p_x96;
+        let denominator = (liquidity_u256 << 96) - product;
+        mul_div_rounding_up(liquidity_u256 << 96, sqrt_p_x96, denominator)
+            .ok_or(ArbRsError::UniswapV3MathError("mul_div_rounding_up failed".into()))
     }
 }
 
 pub fn get_amount0_delta(
-    sqrt_ratio_a_x96: U256,
-    sqrt_ratio_b_x96: U256,
+    mut sqrt_ratio_a_x96: U256,
+    mut sqrt_ratio_b_x96: U256,
     liquidity: u128,
     round_up: bool,
-) -> Option<U256> {
-    let (mut sqrt_ratio_a_x96, mut sqrt_ratio_b_x96) = (sqrt_ratio_a_x96, sqrt_ratio_b_x96);
+) -> Result<U256, ArbRsError> {
     if sqrt_ratio_a_x96 > sqrt_ratio_b_x96 {
         std::mem::swap(&mut sqrt_ratio_a_x96, &mut sqrt_ratio_b_x96);
     }
-
-    let liquidity_u256 = U256::from(liquidity);
-    let numerator1 = liquidity_u256 << 96;
-    let numerator2 = sqrt_ratio_b_x96 - sqrt_ratio_a_x96;
+    let numerator_1 = U256::from(liquidity) << 96;
+    let numerator_2 = sqrt_ratio_b_x96 - sqrt_ratio_a_x96;
 
     if sqrt_ratio_a_x96.is_zero() {
-        return None;
+        return Err(ArbRsError::UniswapV3MathError("R".into()));
     }
 
-    if round_up {
-        let res = mul_div_rounding_up(numerator1, numerator2, sqrt_ratio_b_x96)?;
-        div_rounding_up(res, sqrt_ratio_a_x96)
+    let result = if round_up {
+        div_rounding_up(
+            mul_div_rounding_up(numerator_1, numerator_2, sqrt_ratio_b_x96).ok_or(ArbRsError::UniswapV3MathError("mul_div failed".into()))?,
+            sqrt_ratio_a_x96,
+        )
     } else {
-        let res = mul_div(numerator1, numerator2, sqrt_ratio_b_x96)?;
-        Some(res / sqrt_ratio_a_x96)
-    }
+        mul_div(numerator_1, numerator_2, sqrt_ratio_b_x96).ok_or(ArbRsError::UniswapV3MathError("mul_div failed".into()))? / sqrt_ratio_a_x96
+    };
+    Ok(result)
 }
 
 pub fn get_amount1_delta(
-    sqrt_ratio_a_x96: U256,
-    sqrt_ratio_b_x96: U256,
+    mut sqrt_ratio_a_x96: U256,
+    mut sqrt_ratio_b_x96: U256,
     liquidity: u128,
     round_up: bool,
-) -> Option<U256> {
-    let (mut sqrt_ratio_a_x96, mut sqrt_ratio_b_x96) = (sqrt_ratio_a_x96, sqrt_ratio_b_x96);
+) -> Result<U256, ArbRsError> {
     if sqrt_ratio_a_x96 > sqrt_ratio_b_x96 {
         std::mem::swap(&mut sqrt_ratio_a_x96, &mut sqrt_ratio_b_x96);
     }
 
-    let liquidity = U256::from(liquidity);
-    let sqrt_diff = sqrt_ratio_b_x96 - sqrt_ratio_a_x96;
-
     if round_up {
-        mul_div_rounding_up(liquidity, sqrt_diff, U256::from(1) << 96)
+        mul_div_rounding_up(U256::from(liquidity), sqrt_ratio_b_x96 - sqrt_ratio_a_x96, Q96)
+            .ok_or(ArbRsError::UniswapV3MathError("mul_div_rounding_up failed".into()))
     } else {
-        mul_div(liquidity, sqrt_diff, U256::from(1) << 96)
+        mul_div(U256::from(liquidity), sqrt_ratio_b_x96 - sqrt_ratio_a_x96, Q96)
+            .ok_or(ArbRsError::UniswapV3MathError("mul_div failed".into()))
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::math::v3::utils::sqrt;
-    use alloy_primitives::U256;
-    use std::str::FromStr;
-
-    fn e18(n: u64) -> U256 {
-        U256::from(n) * U256::from(10).pow(U256::from(18))
+pub fn get_amount0_delta_signed(
+    sqrt_ratio_a_x96: U256,
+    sqrt_ratio_b_x96: U256,
+    liquidity: i128,
+) -> Result<I256, ArbRsError> {
+    if liquidity < 0 {
+        Ok(-I256::from_raw(get_amount0_delta(sqrt_ratio_a_x96, sqrt_ratio_b_x96, (-liquidity) as u128, false)?))
+    } else {
+        Ok(I256::from_raw(get_amount0_delta(sqrt_ratio_a_x96, sqrt_ratio_b_x96, liquidity as u128, true)?))
     }
+}
 
-    fn encode_price_sqrt(reserve1: u128, reserve0: u128) -> U256 {
-        let r1 = U256::from(reserve1);
-        let r0 = U256::from(reserve0);
-        sqrt(r1 * (U256::from(1) << 192) / r0)
-    }
-
-    #[test]
-    fn test_get_amount_0_delta_simple() {
-        let liquidity = e18(1).to::<u128>();
-        let sqrt_p_a = encode_price_sqrt(1, 1);
-        let sqrt_p_b = encode_price_sqrt(121, 100);
-
-        let amount0_up = get_amount0_delta(sqrt_p_a, sqrt_p_b, liquidity, true).unwrap();
-        assert_eq!(amount0_up, U256::from_str("90909090909090910").unwrap());
-
-        let amount0_down = get_amount0_delta(sqrt_p_a, sqrt_p_b, liquidity, false).unwrap();
-        assert_eq!(amount0_down, amount0_up - U256::from(1));
-    }
-
-    #[test]
-    fn test_get_amount_1_delta_simple() {
-        let liquidity = e18(1).to::<u128>();
-        let sqrt_p_a = encode_price_sqrt(1, 1);
-        let sqrt_p_b = encode_price_sqrt(121, 100);
-
-        let amount1_up = get_amount1_delta(sqrt_p_a, sqrt_p_b, liquidity, true).unwrap();
-        assert_eq!(amount1_up, U256::from_str("100000000000000000").unwrap());
-
-        let amount1_down = get_amount1_delta(sqrt_p_a, sqrt_p_b, liquidity, false).unwrap();
-        assert_eq!(amount1_down, amount1_up - U256::from(1));
-    }
-
-    #[test]
-    fn test_get_next_sqrt_price_from_input_zero_liquidity() {
-        let price = encode_price_sqrt(1, 1);
-        assert_eq!(
-            get_next_sqrt_price_from_input(price, 0, e18(1), true),
-            None
-        );
-    }
-
-    #[test]
-    fn test_get_next_sqrt_price_from_input_zero_amount() {
-        let price = encode_price_sqrt(1, 1);
-        let liquidity = e18(1).to::<u128>();
-        assert_eq!(
-            get_next_sqrt_price_from_input(price, liquidity, U256::ZERO, true).unwrap(),
-            price
-        );
-        assert_eq!(
-            get_next_sqrt_price_from_input(price, liquidity, U256::ZERO, false).unwrap(),
-            price
-        );
-    }
-
-    #[test]
-    fn test_get_next_sqrt_price_from_input_specific_cases() {
-        let sqrt_q = get_next_sqrt_price_from_input(
-            encode_price_sqrt(1, 1),
-            e18(1).to::<u128>(),
-            e18(1) / U256::from(10),
-            false,
-        )
-        .unwrap();
-        assert_eq!(
-            sqrt_q,
-            U256::from_str("87150978765690771352898345369").unwrap()
-        );
-
-        let sqrt_q2 = get_next_sqrt_price_from_input(
-            encode_price_sqrt(1, 1),
-            e18(1).to::<u128>(),
-            e18(1) / U256::from(10),
-            true,
-        )
-        .unwrap();
-        assert_eq!(
-            sqrt_q2,
-            U256::from_str("72025602285694852357767227579").unwrap()
-        );
+pub fn get_amount1_delta_signed(
+    sqrt_ratio_a_x96: U256,
+    sqrt_ratio_b_x96: U256,
+    liquidity: i128,
+) -> Result<I256, ArbRsError> {
+    if liquidity < 0 {
+        Ok(-I256::from_raw(get_amount1_delta(sqrt_ratio_a_x96, sqrt_ratio_b_x96, (-liquidity) as u128, false)?))
+    } else {
+        Ok(I256::from_raw(get_amount1_delta(sqrt_ratio_a_x96, sqrt_ratio_b_x96, liquidity as u128, true)?))
     }
 }

@@ -1,7 +1,7 @@
 use alloy_primitives::Address;
 use thiserror::Error;
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, PartialEq, Eq)]
 pub enum ArbRsError {
     #[error("Provider error: {0}")]
     ProviderError(String),
@@ -18,6 +18,6 @@ pub enum ArbRsError {
     #[error("Pool calculation error: {0}")]
     CalculationError(String),
 
-    #[error("Uniswap Calculation error: {0}")]
+    #[error("Uniswap V3 Math Error: {0}")]
     UniswapV3MathError(String),
 }

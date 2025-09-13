@@ -1,5 +1,5 @@
 use alloy_primitives::I256;
-use super::tick_math::{MIN_TICK, MAX_TICK};
+use super::constants::{MAX_TICK, MIN_TICK};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Tick {
@@ -22,19 +22,21 @@ pub struct Tick {
     pub initialized: bool,
 }
 
+/// Uses integer arithmetic for ceiling division
 fn get_min_tick(tick_spacing: i32) -> i32 {
-    (MIN_TICK as f64 / tick_spacing as f64).ceil() as i32 * tick_spacing
+    (MIN_TICK + tick_spacing - 1).div_euclid(tick_spacing) * tick_spacing
 }
 
+/// Uses integer arithmetic for floor division
 fn get_max_tick(tick_spacing: i32) -> i32 {
-    (MAX_TICK as f64 / tick_spacing as f64).floor() as i32 * tick_spacing
+    (MAX_TICK).div_euclid(tick_spacing) * tick_spacing
 }
 
-/// Calculates the maximum liquidity per tick for a given tick spacing.
 pub fn tick_spacing_to_max_liquidity_per_tick(tick_spacing: i32) -> u128 {
     let min_tick = get_min_tick(tick_spacing);
     let max_tick = get_max_tick(tick_spacing);
     let num_ticks = ((max_tick - min_tick) / tick_spacing) as u128 + 1;
+    if num_ticks == 0 { return 0; }
     u128::MAX / num_ticks
 }
 
@@ -45,10 +47,6 @@ mod tests {
 
     #[test]
     fn test_tick_spacing_to_max_liquidity_per_tick() {
-        let _fee_amount_low = 500;
-        let _fee_amount_medium = 3000;
-        let _fee_amount_high = 10000;
-
         let tick_spacing_low = 10;
         let tick_spacing_medium = 60;
         let tick_spacing_high = 200;

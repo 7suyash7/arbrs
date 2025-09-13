@@ -16,38 +16,38 @@ pub fn next_initialized_tick_within_one_word(
     let compressed = tick / tick_spacing;
 
     if lte {
-        let (_word_pos, bit_pos) = position(compressed);
-        let mask = (U256::from(1) << bit_pos) - U256::from(1);
+        let (word_pos, bit_pos) = position(compressed);
+
+        let mask = (U256::from(1) << bit_pos) | ((U256::from(1) << bit_pos) - U256::from(1));
         let masked = bitmap & mask;
 
         if masked != U256::ZERO {
             let most_significant_bit = bit_math::most_significant_bit(masked);
-            let next_bit = (bit_pos as i32) - (most_significant_bit as i32);
-            let next_tick = (compressed - next_bit) * tick_spacing;
-            return Some((next_tick, true));
+            let next_tick_compressed = (word_pos as i32 * 256) + most_significant_bit as i32;
+            return Some((next_tick_compressed * tick_spacing, true));
         }
     } else {
-        let (_word_pos, bit_pos) = position(compressed + 1);
+        let (word_pos, bit_pos) = position(compressed + 1);
+
         let mask = !((U256::from(1) << bit_pos) - U256::from(1));
         let masked = bitmap & mask;
 
         if masked != U256::ZERO {
             let least_significant_bit = bit_math::least_significant_bit(masked);
-            let next_bit = (least_significant_bit as i32) - (bit_pos as i32);
-            let next_tick = (compressed + 1 + next_bit) * tick_spacing;
-            return Some((next_tick, true));
+            let next_tick_compressed = (word_pos as i32 * 256) + least_significant_bit as i32;
+            return Some((next_tick_compressed * tick_spacing, true));
         }
     }
 
     None
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
 
-    // Test-only equivalent of Degenbot's flip_tick to set up test scenarios
     fn flip_tick(bitmap: &mut HashMap<i16, U256>, tick: i32) {
         let (word_pos, bit_pos) = position(tick);
         let mask = U256::from(1) << bit_pos;
@@ -74,19 +74,15 @@ mod tests {
             flip_tick(&mut bitmap, tick);
         }
 
-        // returns tick to right if at initialized tick
         let (word, _) = position(78);
-        let result = next_initialized_tick_within_one_word(bitmap[&word], 78, 1, false);
+        let result = next_initialized_tick_within_one_word(bitmap.get(&word).copied().unwrap_or_default(), 78, 1, false);
         assert_eq!(result, Some((84, true)));
 
-        // returns the tick directly to the right
         let (word, _) = position(77);
-        let result = next_initialized_tick_within_one_word(bitmap[&word], 77, 1, false);
+        let result = next_initialized_tick_within_one_word(bitmap.get(&word).copied().unwrap_or_default(), 77, 1, false);
         assert_eq!(result, Some((78, true)));
 
-        // returns next initialized tick in next word
-        let (word, _) = position(-257);
-        let result = next_initialized_tick_within_one_word(bitmap[&word], -257, 1, false);
+        let result = next_initialized_tick_within_one_word(bitmap.get(&-1).copied().unwrap_or_default(), -257, 1, false);
         assert_eq!(result, Some((-200, true)));
     }
 
@@ -98,14 +94,12 @@ mod tests {
             flip_tick(&mut bitmap, tick);
         }
 
-        // returns same tick if initialized
         let (word, _) = position(78);
-        let result = next_initialized_tick_within_one_word(bitmap[&word], 78, 1, true);
+        let result = next_initialized_tick_within_one_word(bitmap.get(&word).copied().unwrap_or_default(), 78, 1, true);
         assert_eq!(result, Some((78, true)));
 
-        // returns tick to the left
         let (word, _) = position(79);
-        let result = next_initialized_tick_within_one_word(bitmap[&word], 79, 1, true);
+        let result = next_initialized_tick_within_one_word(bitmap.get(&word).copied().unwrap_or_default(), 79, 1, true);
         assert_eq!(result, Some((78, true)));
     }
 }
