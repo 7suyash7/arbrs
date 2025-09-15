@@ -1,15 +1,18 @@
+use crate::core::messaging::{Publisher, PublisherMessage, Subscriber};
 use crate::core::token::{Token, TokenLike};
 use crate::errors::ArbRsError;
-use crate::pool::LiquidityPool;
 use crate::pool::strategy::V2CalculationStrategy;
+use crate::pool::uniswap_v2_simulation::UniswapV2PoolSimulationResult;
+use crate::pool::LiquidityPool;
 use alloy_primitives::{Address, B256, Bytes, TxKind, U256, keccak256};
 use alloy_provider::Provider;
 use alloy_rpc_types::{BlockId, TransactionRequest};
 use alloy_sol_types::{SolCall, sol};
 use async_trait::async_trait;
 use std::any::Any;
+use std::collections::BTreeMap;
 use std::fmt::{Debug, Formatter, Result as FmtResult};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use tokio::sync::RwLock;
 
 // ABI Definition
@@ -22,6 +25,7 @@ sol!(
 pub struct UniswapV2PoolState {
     pub reserve0: U256,
     pub reserve1: U256,
+    pub block_number: u64,
 }
 
 pub struct UniswapV2Pool<P: ?Sized, S: V2CalculationStrategy> {
@@ -31,6 +35,38 @@ pub struct UniswapV2Pool<P: ?Sized, S: V2CalculationStrategy> {
     state: RwLock<UniswapV2PoolState>,
     provider: Arc<P>,
     strategy: S,
+    state_cache: RwLock<BTreeMap<u64, UniswapV2PoolState>>,
+    subscribers: RwLock<Vec<Weak<dyn Subscriber<P>>>>,
+}
+
+#[async_trait]
+impl<P: Provider + Send + Sync + 'static + ?Sized, S: V2CalculationStrategy + 'static> Publisher<P>
+    for UniswapV2Pool<P, S>
+{
+    async fn subscribe(&self, subscriber: Weak<dyn Subscriber<P>>) {
+        let mut subscribers = self.subscribers.write().await;
+        subscribers.push(subscriber);
+    }
+
+    async fn unsubscribe(&self, subscriber_id: usize) {
+        let mut subscribers = self.subscribers.write().await;
+        subscribers.retain(|weak_sub| {
+            if let Some(sub) = weak_sub.upgrade() {
+                sub.id() != subscriber_id
+            } else {
+                false // Remove dead weak pointers
+            }
+        });
+    }
+
+    async fn notify_subscribers(&self, message: PublisherMessage) {
+        let subscribers = self.subscribers.read().await;
+        for weak_sub in subscribers.iter() {
+            if let Some(sub) = weak_sub.upgrade() {
+                sub.notify(message.clone()).await;
+            }
+        }
+    }
 }
 
 impl<P: Provider + Send + Sync + ?Sized + 'static, S: V2CalculationStrategy> UniswapV2Pool<P, S> {
@@ -49,6 +85,8 @@ impl<P: Provider + Send + Sync + ?Sized + 'static, S: V2CalculationStrategy> Uni
             state: RwLock::new(UniswapV2PoolState::default()),
             provider,
             strategy,
+            state_cache: RwLock::new(BTreeMap::new()),
+            subscribers: RwLock::new(Vec::new()),
         }
     }
 
@@ -144,6 +182,193 @@ impl<P: Provider + Send + Sync + ?Sized + 'static, S: V2CalculationStrategy> Uni
         data.extend_from_slice(init_code_hash.as_slice());
         Address::from_slice(&keccak256(data)[12..])
     }
+    
+    /// Restore the last pool state recorded prior to a target block.
+    pub async fn restore_state_before_block(&self, block: u64) -> Result<(), ArbRsError> {
+        let mut state_cache = self.state_cache.write().await;
+        let mut keys_to_remove = Vec::new();
+
+        for &block_number in state_cache.keys() {
+            if block_number >= block {
+                keys_to_remove.push(block_number);
+            }
+        }
+
+        for key in keys_to_remove {
+            state_cache.remove(&key);
+        }
+
+        if let Some((&latest_block, latest_state)) = state_cache.iter().next_back() {
+            let mut current_state = self.state.write().await;
+            *current_state = latest_state.clone();
+            current_state.block_number = latest_block;
+            Ok(())
+        } else {
+            Err(ArbRsError::NoPoolStateAvailable(block))
+        }
+    }
+    
+    /// Discard states recorded prior to a target block.
+    pub async fn discard_states_before_block(&self, block: u64) {
+        let mut state_cache = self.state_cache.write().await;
+        let keys_to_remove: Vec<u64> = state_cache
+            .keys()
+            .filter(|&&b| b < block)
+            .cloned()
+            .collect();
+        for key in keys_to_remove {
+            state_cache.remove(&key);
+        }
+    }
+
+    pub async fn calculate_tokens_in_from_ratio_out(
+        &self,
+        token_in: &Token<P>,
+        ratio_absolute: f64,
+    ) -> Result<U256, ArbRsError> {
+        self.validate_token_in(token_in)?;
+        let current_state = self.state.read().await;
+
+        let (reserve_in, reserve_out) = if token_in.address() == self.token0.address() {
+            (current_state.reserve0, current_state.reserve1)
+        } else {
+            (current_state.reserve1, current_state.reserve0)
+        };
+
+        if ratio_absolute <= 0.0 {
+            return Err(ArbRsError::CalculationError(
+                "Ratio must be positive".to_string(),
+            ));
+        }
+        
+        let reserve_in_f = reserve_in.to_string().parse::<f64>().unwrap_or(0.0);
+        let reserve_out_f = reserve_out.to_string().parse::<f64>().unwrap_or(0.0);
+        
+        let fee = self.strategy.get_fee_bps() as f64 / 10000.0;
+        
+        let amount_in = reserve_out_f / ratio_absolute - reserve_in_f / (1.0 - fee);
+        
+        if amount_in > 0.0 {
+            Ok(U256::from(amount_in.floor() as u128))
+        } else {
+            Ok(U256::ZERO)
+        }
+    }
+
+    pub async fn simulate_add_liquidity(
+        &self,
+        added_reserves_token0: U256,
+        added_reserves_token1: U256,
+        override_state: Option<&UniswapV2PoolState>,
+    ) -> UniswapV2PoolSimulationResult {
+        let state_guard = self.state.read().await;
+        let initial_state = override_state.unwrap_or(&state_guard);
+
+        let final_state = UniswapV2PoolState {
+            reserve0: initial_state.reserve0 + added_reserves_token0,
+            reserve1: initial_state.reserve1 + added_reserves_token1,
+            block_number: initial_state.block_number,
+        };
+
+        UniswapV2PoolSimulationResult {
+            amount0_delta: added_reserves_token0,
+            amount1_delta: added_reserves_token1,
+            initial_state: initial_state.clone(),
+            final_state,
+        }
+    }
+
+    pub async fn simulate_remove_liquidity(
+        &self,
+        removed_reserves_token0: U256,
+        removed_reserves_token1: U256,
+        override_state: Option<&UniswapV2PoolState>,
+    ) -> UniswapV2PoolSimulationResult {
+        let state_guard = self.state.read().await;
+        let initial_state = override_state.unwrap_or(&state_guard);
+
+        let final_state = UniswapV2PoolState {
+            reserve0: initial_state.reserve0 - removed_reserves_token0,
+            reserve1: initial_state.reserve1 - removed_reserves_token1,
+            block_number: initial_state.block_number,
+        };
+
+        UniswapV2PoolSimulationResult {
+            amount0_delta: U256::ZERO - removed_reserves_token0,
+            amount1_delta: U256::ZERO - removed_reserves_token1,
+            initial_state: initial_state.clone(),
+            final_state,
+        }
+    }
+
+    pub async fn simulate_exact_input_swap(
+        &self,
+        token_in: &Token<P>,
+        token_in_quantity: U256,
+        override_state: Option<&UniswapV2PoolState>,
+    ) -> Result<UniswapV2PoolSimulationResult, ArbRsError> {
+        self.validate_token_in(token_in)?;
+        let state_guard = self.state.read().await;
+        let initial_state = override_state.unwrap_or(&state_guard);
+
+        let token_out_quantity = self
+            .calculate_tokens_out_with_override(token_in, token_in_quantity, initial_state)?;
+            
+        let (amount0_delta, amount1_delta) = if token_in.address() == self.token0.address() {
+            (token_in_quantity, U256::ZERO - token_out_quantity)
+        } else {
+            (U256::ZERO - token_out_quantity, token_in_quantity)
+        };
+
+        let final_state = UniswapV2PoolState {
+            reserve0: initial_state.reserve0 + amount0_delta,
+            reserve1: initial_state.reserve1 + amount1_delta,
+            block_number: initial_state.block_number,
+        };
+
+        Ok(UniswapV2PoolSimulationResult {
+            amount0_delta,
+            amount1_delta,
+            initial_state: initial_state.clone(),
+            final_state,
+        })
+    }
+
+    pub async fn simulate_exact_output_swap(
+        &self,
+        token_out: &Token<P>,
+        token_out_quantity: U256,
+        override_state: Option<&UniswapV2PoolState>,
+    ) -> Result<UniswapV2PoolSimulationResult, ArbRsError> {
+        self.validate_token_out(token_out)?;
+        let state_guard = self.state.read().await;
+        let initial_state = override_state.unwrap_or(&state_guard);
+
+        let token_in_quantity = self.calculate_tokens_in_from_tokens_out_with_override(
+            token_out,
+            token_out_quantity,
+            initial_state,
+        )?;
+        
+        let (amount0_delta, amount1_delta) = if token_out.address() == self.token1.address() {
+            (token_in_quantity, U256::ZERO - token_out_quantity)
+        } else {
+            (U256::ZERO - token_out_quantity, token_in_quantity)
+        };
+        
+        let final_state = UniswapV2PoolState {
+            reserve0: initial_state.reserve0 + amount0_delta,
+            reserve1: initial_state.reserve1 + amount1_delta,
+            block_number: initial_state.block_number,
+        };
+
+        Ok(UniswapV2PoolSimulationResult {
+            amount0_delta,
+            amount1_delta,
+            initial_state: initial_state.clone(),
+            final_state,
+        })
+    }
 }
 
 #[async_trait]
@@ -163,24 +388,63 @@ impl<P: Provider + Send + Sync + ?Sized + 'static, S: V2CalculationStrategy + 's
     }
 
     async fn update_state(&self) -> Result<(), ArbRsError> {
+        let latest_block = self
+            .provider
+            .get_block_number()
+            .await
+            .map_err(|e| ArbRsError::ProviderError(e.to_string()))?;
+
+        let current_block_number = self.state.read().await.block_number;
+
+        if latest_block < current_block_number {
+            return Err(ArbRsError::LateUpdateError {
+                attempted_block: latest_block,
+                latest_block: current_block_number,
+            });
+        }
+
         let call = getReservesCall {};
         let request = TransactionRequest {
             to: Some(TxKind::Call(self.address)),
             input: Some(Bytes::from(call.abi_encode())).into(),
             ..Default::default()
         };
+
         let result_bytes = self
             .provider
             .call(request)
             .block(BlockId::latest())
             .await
             .map_err(|e| ArbRsError::ProviderError(e.to_string()))?;
+
         let decoded = getReservesCall::abi_decode_returns(&result_bytes)
             .map_err(|e| ArbRsError::AbiDecodeError(e.to_string()))?;
 
-        let mut state = self.state.write().await;
-        state.reserve0 = U256::from(decoded.reserve0);
-        state.reserve1 = U256::from(decoded.reserve1);
+        let new_state = UniswapV2PoolState {
+            reserve0: U256::from(decoded.reserve0),
+            reserve1: U256::from(decoded.reserve1),
+            block_number: latest_block,
+        };
+
+        let (state_updated, old_state) = {
+            let state = self.state.read().await;
+            (
+                state.reserve0 != new_state.reserve0 || state.reserve1 != new_state.reserve1,
+                state.clone(),
+            )
+        };
+
+        if state_updated {
+            let mut state_writer = self.state.write().await;
+            *state_writer = new_state.clone();
+
+            let mut cache = self.state_cache.write().await;
+            cache.insert(latest_block, new_state.clone());
+
+            self.notify_subscribers(PublisherMessage::PoolStateUpdate(new_state))
+                .await;
+        }
+
         Ok(())
     }
 
@@ -255,5 +519,84 @@ impl<P: ?Sized, S: V2CalculationStrategy> Debug for UniswapV2Pool<P, S> {
             .field("address", &self.address)
             .field("strategy", &self.strategy)
             .finish_non_exhaustive()
+    }
+}
+
+
+pub struct UnregisteredLiquidityPool<P: ?Sized> {
+    address: Address,
+    token0: Arc<Token<P>>,
+    token1: Arc<Token<P>>,
+}
+
+impl<P: Provider + Send + Sync + ?Sized + 'static> UnregisteredLiquidityPool<P> {
+    pub fn new(address: Address, token0: Arc<Token<P>>, token1: Arc<Token<P>>) -> Self {
+        Self {
+            address,
+            token0,
+            token1,
+        }
+    }
+}
+
+#[async_trait]
+impl<P: Provider + Send + Sync + ?Sized + 'static> LiquidityPool<P>
+    for UnregisteredLiquidityPool<P>
+{
+    fn address(&self) -> Address {
+        self.address
+    }
+
+    fn tokens(&self) -> (Arc<Token<P>>, Arc<Token<P>>) {
+        (self.token0.clone(), self.token1.clone())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    async fn update_state(&self) -> Result<(), ArbRsError> {
+        // Unregistered pools do not fetch state
+        Ok(())
+    }
+
+    async fn calculate_tokens_out(
+        &self,
+        _token_in: &Token<P>,
+        _amount_in: U256,
+    ) -> Result<U256, ArbRsError> {
+        Err(ArbRsError::CalculationError(
+            "Cannot calculate output for unregistered pool".to_string(),
+        ))
+    }
+
+    async fn calculate_tokens_in_from_tokens_out(
+        &self,
+        _token_out: &Token<P>,
+        _amount_out: U256,
+    ) -> Result<U256, ArbRsError> {
+        Err(ArbRsError::CalculationError(
+            "Cannot calculate input for unregistered pool".to_string(),
+        ))
+    }
+
+    async fn nominal_price(&self) -> Result<f64, ArbRsError> {
+        Err(ArbRsError::CalculationError(
+            "Cannot get price for unregistered pool".to_string(),
+        ))
+    }
+
+    async fn absolute_price(&self) -> Result<f64, ArbRsError> {
+        Err(ArbRsError::CalculationError(
+            "Cannot get price for unregistered pool".to_string(),
+        ))
+    }
+}
+
+impl<P: ?Sized> Debug for UnregisteredLiquidityPool<P> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
+        f.debug_struct("UnregisteredLiquidityPool")
+            .field("address", &self.address)
+            .finish()
     }
 }

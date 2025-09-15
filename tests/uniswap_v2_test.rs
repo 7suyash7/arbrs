@@ -7,10 +7,14 @@ use arbrs::manager::token_manager::TokenManager;
 use arbrs::ArbRsError;
 use arbrs::pool::LiquidityPool;
 use arbrs::pool::strategy::{PancakeV2Logic, StandardV2Logic, V2CalculationStrategy};
-use arbrs::pool::uniswap_v2::{UniswapV2Pool, UniswapV2PoolState};
+use arbrs::pool::uniswap_v2::{UniswapV2Pool, UniswapV2PoolState, UnregisteredLiquidityPool};
+use arbrs::core::messaging::{Publisher, Subscriber, PublisherMessage};
+use async_trait::async_trait;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::str::FromStr;
 use std::sync::Arc;
 use url::Url;
+use rand::random;
 
 const WETH_ADDRESS: Address = address!("C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2");
 const WBTC_ADDRESS: Address = address!("2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599");
@@ -57,7 +61,7 @@ async fn setup_concrete_v2_pool<S: V2CalculationStrategy + Clone + 'static>(
         strategy,
     ));
 
-    pool.update_state().await.unwrap();
+    // pool.update_state().await.unwrap();
     (manager, pool)
 }
 
@@ -86,6 +90,7 @@ async fn setup_pool_manager() -> PoolManager<DynProvider> {
 #[tokio::test]
 async fn test_v2_calculate_tokens_out() {
     let (manager, pool) = setup_standard_v2_pool().await;
+    pool.update_state().await.unwrap();
     let wbtc = manager.get_token(WBTC_ADDRESS).await.unwrap();
     let amount_in = U256::from(8_000_000_000_u64);
     let expected_amount_out = U256::from_str("847228560678214929944").unwrap();
@@ -98,6 +103,7 @@ async fn test_v2_calculate_tokens_out() {
 #[tokio::test]
 async fn test_v2_calculate_tokens_in() {
     let (manager, pool) = setup_standard_v2_pool().await;
+    pool.update_state().await.unwrap();
     let weth = manager.get_token(WETH_ADDRESS).await.unwrap();
     let amount_out = U256::from_str("1200000000000000000000").unwrap();
     let expected_amount_in = U256::from(14_245_938_804_u64);
@@ -144,6 +150,7 @@ async fn test_v2_input_validation() {
 async fn test_v2_price_calculation() {
     let (_manager, pool) = setup_standard_v2_pool().await;
     let (wbtc, weth) = pool.tokens();
+    pool.update_state().await.unwrap();
 
     let nominal_price = pool.nominal_price().await.unwrap();
     let absolute_price = pool.absolute_price().await.unwrap();
@@ -160,6 +167,7 @@ async fn test_v2_price_calculation() {
 async fn test_v2_insufficient_liquidity_swap() {
     let (manager, pool) = setup_standard_v2_pool().await;
     let weth = manager.get_token(WETH_ADDRESS).await.unwrap();
+    pool.update_state().await.unwrap();
 
     let concrete_pool = pool
         .as_any()
@@ -210,6 +218,7 @@ async fn test_v2_state_override_calculation() {
         WETH_ADDRESS,
     )
     .await;
+    pool.update_state().await.unwrap();
     let wbtc = manager.get_token(WBTC_ADDRESS).await.unwrap();
     let weth = manager.get_token(WETH_ADDRESS).await.unwrap();
 
@@ -218,6 +227,7 @@ async fn test_v2_state_override_calculation() {
     let override_reserves = UniswapV2PoolState {
         reserve0: U256::from(2000) * U256::from(10).pow(U256::from(wbtc.decimals())),
         reserve1: U256::from(30000) * U256::from(10).pow(U256::from(weth.decimals())),
+        block_number: 0,
     };
 
     let live_amount_out = pool.calculate_tokens_out(&wbtc, amount_in).await.unwrap();
@@ -326,4 +336,111 @@ async fn test_pool_manager_fee_assignment() {
         .expect("Failed to downcast Sushiswap pool to V2 with StandardV2Logic");
 
     assert_eq!(sushi_pool_concrete.strategy().get_fee_bps(), 30);
+}
+
+#[tokio::test]
+async fn test_state_caching_and_management() {
+    let (_, pool) = setup_concrete_v2_pool(
+        StandardV2Logic,
+        WBTC_WETH_POOL_ADDRESS,
+        WBTC_ADDRESS,
+        WETH_ADDRESS,
+    ).await;
+
+    // First update, cache should have one entry
+    pool.update_state().await.unwrap();
+    let initial_state = pool.get_cached_reserves().await;
+    assert_ne!(initial_state.block_number, 0);
+
+    // Simulate a new block with no changes
+    let next_block = initial_state.block_number + 1;
+    let _ = pool.restore_state_before_block(next_block).await;
+    
+    // This should work and not change the state since it's the latest
+    assert_eq!(pool.get_cached_reserves().await.block_number, initial_state.block_number);
+
+    // Discard old states
+    pool.discard_states_before_block(initial_state.block_number).await;
+    // The current state should remain
+    assert_eq!(pool.get_cached_reserves().await.block_number, initial_state.block_number);
+
+    pool.discard_states_before_block(next_block).await;
+    // Now the cache should be empty, but the `state` field still holds the last value
+    assert_eq!(pool.get_cached_reserves().await.block_number, initial_state.block_number);
+}
+
+#[tokio::test]
+async fn test_advanced_calculations() {
+    let (manager, pool) = setup_concrete_v2_pool(
+        StandardV2Logic,
+        WBTC_WETH_POOL_ADDRESS,
+        WBTC_ADDRESS,
+        WETH_ADDRESS,
+    ).await;
+    pool.update_state().await.unwrap();
+    let wbtc = manager.get_token(WBTC_ADDRESS).await.unwrap();
+    
+    // Test ratio calculation
+    let ratio = 15.0; // 1 WBTC = 15 WETH
+    let amount_in = pool.calculate_tokens_in_from_ratio_out(&wbtc, ratio).await.unwrap();
+    assert!(amount_in > U256::ZERO, "Ratio calculation should yield a positive input amount");
+
+    // Test simulations
+    let add_liquidity_result = pool.simulate_add_liquidity(U256::from(100), U256::from(100), None).await;
+    assert_eq!(add_liquidity_result.amount0_delta, U256::from(100));
+}
+
+#[tokio::test]
+async fn test_unregistered_pool() {
+    let (_manager, pool) = setup_standard_v2_pool().await;
+    let (token0, token1) = pool.tokens();
+    let unregistered_pool = UnregisteredLiquidityPool::<DynProvider>::new(
+        Address::new(random::<[u8; 20]>()),
+        token0.clone(),
+        token1.clone(),
+    );
+
+    let result = unregistered_pool.calculate_tokens_out(&token0, U256::from(100)).await;
+    assert!(matches!(result, Err(ArbRsError::CalculationError(_))));
+}
+
+
+struct TestSubscriber {
+    id: usize,
+    notified: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl<P: Provider + Send + Sync + 'static + ?Sized> Subscriber<P> for TestSubscriber {
+    fn id(&self) -> usize {
+        self.id
+    }
+
+    async fn notify(&self, _message: PublisherMessage) {
+        self.notified.store(true, Ordering::SeqCst);
+    }
+}
+
+#[tokio::test]
+async fn test_pub_sub() {
+    let (_manager, pool) = setup_concrete_v2_pool(
+        StandardV2Logic,
+        WBTC_WETH_POOL_ADDRESS,
+        WBTC_ADDRESS,
+        WETH_ADDRESS,
+    )
+    .await;
+
+    let notified = Arc::new(AtomicBool::new(false));
+    let subscriber = Arc::new(TestSubscriber {
+        id: 1,
+        notified: notified.clone(),
+    });
+
+    pool.subscribe(Arc::downgrade(&subscriber) as std::sync::Weak<dyn Subscriber<DynProvider>>)
+        .await;
+
+    pool.update_state().await.unwrap();
+
+    assert!(notified.load(Ordering::SeqCst), "Subscriber was not notified");
 }

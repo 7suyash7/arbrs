@@ -20,4 +20,13 @@ pub enum ArbRsError {
 
     #[error("Uniswap V3 Math Error: {0}")]
     UniswapV3MathError(String),
+
+    #[error("No pool state known prior to block {0}")]
+    NoPoolStateAvailable(u64),
+
+    #[error("Update attempted for a block ({attempted_block}) prior to the last recorded update ({latest_block})")]
+    LateUpdateError {
+        attempted_block: u64,
+        latest_block: u64,
+    },
 }

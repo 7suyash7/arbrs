@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 pub mod strategy;
 pub mod uniswap_v2;
+pub mod uniswap_v2_simulation;
 
 #[async_trait]
 pub trait LiquidityPool<P: Provider + Send + Sync + 'static + ?Sized>: Debug + Send + Sync {
@@ -45,4 +46,11 @@ pub trait LiquidityPool<P: Provider + Send + Sync + 'static + ?Sized>: Debug + S
 
     /// Downcasting methjod
     fn as_any(&self) -> &dyn Any;
+}
+
+#[derive(Debug, Clone)]
+pub struct UniswapPoolSwapVector<P: Provider + Send + Sync + 'static + ?Sized> {
+    pub token_in: Arc<Token<P>>,
+    pub token_out: Arc<Token<P>>,
+    pub zero_for_one: bool,
 }
