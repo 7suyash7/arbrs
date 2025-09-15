@@ -6,7 +6,7 @@ use crate::pool::uniswap_v2_simulation::UniswapV2PoolSimulationResult;
 use crate::pool::LiquidityPool;
 use alloy_primitives::{Address, B256, Bytes, TxKind, U256, keccak256};
 use alloy_provider::Provider;
-use alloy_rpc_types::{BlockId, TransactionRequest};
+use alloy_rpc_types::{BlockId, BlockNumberOrTag, TransactionRequest};
 use alloy_sol_types::{SolCall, sol};
 use async_trait::async_trait;
 use std::any::Any;
@@ -256,23 +256,39 @@ impl<P: Provider + Send + Sync + ?Sized + 'static, S: V2CalculationStrategy> Uni
     }
 
     pub async fn simulate_add_liquidity(
-        &self,
-        added_reserves_token0: U256,
-        added_reserves_token1: U256,
-        override_state: Option<&UniswapV2PoolState>,
+    &self,
+    added_reserves_token0: U256,
+    added_reserves_token1: U256,
+    override_state: Option<&UniswapV2PoolState>,
     ) -> UniswapV2PoolSimulationResult {
         let state_guard = self.state.read().await;
         let initial_state = override_state.unwrap_or(&state_guard);
 
+        let (amount0_actual, amount1_actual) = if initial_state.reserve0 == U256::ZERO
+            && initial_state.reserve1 == U256::ZERO
+        {
+            (added_reserves_token0, added_reserves_token1)
+        } else {
+            let amount1_optimal =
+                added_reserves_token0 * initial_state.reserve1 / initial_state.reserve0;
+            if amount1_optimal <= added_reserves_token1 {
+                (added_reserves_token0, amount1_optimal)
+            } else {
+                let amount0_optimal =
+                    added_reserves_token1 * initial_state.reserve0 / initial_state.reserve1;
+                (amount0_optimal, added_reserves_token1)
+            }
+        };
+
         let final_state = UniswapV2PoolState {
-            reserve0: initial_state.reserve0 + added_reserves_token0,
-            reserve1: initial_state.reserve1 + added_reserves_token1,
+            reserve0: initial_state.reserve0 + amount0_actual,
+            reserve1: initial_state.reserve1 + amount1_actual,
             block_number: initial_state.block_number,
         };
 
         UniswapV2PoolSimulationResult {
-            amount0_delta: added_reserves_token0,
-            amount1_delta: added_reserves_token1,
+            amount0_delta: amount0_actual,
+            amount1_delta: amount1_actual,
             initial_state: initial_state.clone(),
             final_state,
         }
@@ -369,6 +385,38 @@ impl<P: Provider + Send + Sync + ?Sized + 'static, S: V2CalculationStrategy> Uni
             final_state,
         })
     }
+
+    /// Fetches reserves at a specific block number without updating the live state.
+    pub async fn _fetch_state_at_block(&self, block_number: u64) -> Result<UniswapV2PoolState, ArbRsError> {
+        let call = getReservesCall {};
+        let request = TransactionRequest {
+            to: Some(TxKind::Call(self.address)),
+            input: Some(Bytes::from(call.abi_encode())).into(),
+            ..Default::default()
+        };
+        let result_bytes = self
+            .provider
+            .call(request)
+            .block(BlockId::Number(BlockNumberOrTag::Number(block_number)))
+            .await
+            .map_err(|e| ArbRsError::ProviderError(e.to_string()))?;
+        let decoded = getReservesCall::abi_decode_returns(&result_bytes)
+            .map_err(|e| ArbRsError::AbiDecodeError(e.to_string()))?;
+        Ok(UniswapV2PoolState {
+            reserve0: U256::from(decoded.reserve0),
+            reserve1: U256::from(decoded.reserve1),
+            block_number,
+        })
+    }
+
+    /// Fetches state at a specific block and adds it to the cache.
+    /// Used for populating historical data for simulations.
+    pub async fn fetch_and_cache_state_at_block(&self, block_number: u64) -> Result<UniswapV2PoolState, ArbRsError> {
+        let new_state = self._fetch_state_at_block(block_number).await?;
+        let mut cache = self.state_cache.write().await;
+        cache.insert(block_number, new_state.clone());
+        Ok(new_state)
+    }
 }
 
 #[async_trait]
@@ -426,7 +474,7 @@ impl<P: Provider + Send + Sync + ?Sized + 'static, S: V2CalculationStrategy + 's
             block_number: latest_block,
         };
 
-        let (state_updated, old_state) = {
+        let (state_updated, _old_state) = {
             let state = self.state.read().await;
             (
                 state.reserve0 != new_state.reserve0 || state.reserve1 != new_state.reserve1,

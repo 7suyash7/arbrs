@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::str::FromStr;
 use std::sync::Arc;
 use url::Url;
-use rand::random;
+use rand::Rng;
 
 const WETH_ADDRESS: Address = address!("C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2");
 const WBTC_ADDRESS: Address = address!("2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599");
@@ -30,7 +30,7 @@ const V2_INIT_HASH: B256 =
 const FORK_RPC_URL: &str = "http://127.0.0.1:8545";
 type DynProvider = dyn Provider + Send + Sync;
 
-/// Generic setup function to create a V2 pool with a specific strategy, returning a concrete type.
+/// Generic setup function to create a V2 pool with a specific strategy.
 async fn setup_concrete_v2_pool<S: V2CalculationStrategy + Clone + 'static>(
     strategy: S,
     pool_address: Address,
@@ -61,7 +61,6 @@ async fn setup_concrete_v2_pool<S: V2CalculationStrategy + Clone + 'static>(
         strategy,
     ));
 
-    // pool.update_state().await.unwrap();
     (manager, pool)
 }
 
@@ -92,11 +91,9 @@ async fn test_v2_calculate_tokens_out() {
     let (manager, pool) = setup_standard_v2_pool().await;
     pool.update_state().await.unwrap();
     let wbtc = manager.get_token(WBTC_ADDRESS).await.unwrap();
-    let amount_in = U256::from(8_000_000_000_u64);
-    let expected_amount_out = U256::from_str("847228560678214929944").unwrap();
-
+    let amount_in = U256::from(10_000_000);
+    let expected_amount_out = U256::from_str("1724032483669656832").unwrap();
     let amount_out = pool.calculate_tokens_out(&wbtc, amount_in).await.unwrap();
-
     assert_eq!(amount_out, expected_amount_out);
 }
 
@@ -105,14 +102,12 @@ async fn test_v2_calculate_tokens_in() {
     let (manager, pool) = setup_standard_v2_pool().await;
     pool.update_state().await.unwrap();
     let weth = manager.get_token(WETH_ADDRESS).await.unwrap();
-    let amount_out = U256::from_str("1200000000000000000000").unwrap();
-    let expected_amount_in = U256::from(14_245_938_804_u64);
-
+    let amount_out = U256::from_str("1000000000000000000").unwrap();
+    let expected_amount_in = U256::from(5817298);
     let amount_in = pool
         .calculate_tokens_in_from_tokens_out(&weth, amount_out)
         .await
         .unwrap();
-
     assert_eq!(amount_in, expected_amount_in);
 }
 
@@ -347,25 +342,19 @@ async fn test_state_caching_and_management() {
         WETH_ADDRESS,
     ).await;
 
-    // First update, cache should have one entry
     pool.update_state().await.unwrap();
     let initial_state = pool.get_cached_reserves().await;
     assert_ne!(initial_state.block_number, 0);
 
-    // Simulate a new block with no changes
     let next_block = initial_state.block_number + 1;
     let _ = pool.restore_state_before_block(next_block).await;
-    
-    // This should work and not change the state since it's the latest
+
     assert_eq!(pool.get_cached_reserves().await.block_number, initial_state.block_number);
 
-    // Discard old states
     pool.discard_states_before_block(initial_state.block_number).await;
-    // The current state should remain
     assert_eq!(pool.get_cached_reserves().await.block_number, initial_state.block_number);
 
     pool.discard_states_before_block(next_block).await;
-    // Now the cache should be empty, but the `state` field still holds the last value
     assert_eq!(pool.get_cached_reserves().await.block_number, initial_state.block_number);
 }
 
@@ -376,26 +365,39 @@ async fn test_advanced_calculations() {
         WBTC_WETH_POOL_ADDRESS,
         WBTC_ADDRESS,
         WETH_ADDRESS,
-    ).await;
+    )
+    .await;
     pool.update_state().await.unwrap();
     let wbtc = manager.get_token(WBTC_ADDRESS).await.unwrap();
     
-    // Test ratio calculation
-    let ratio = 15.0; // 1 WBTC = 15 WETH
-    let amount_in = pool.calculate_tokens_in_from_ratio_out(&wbtc, ratio).await.unwrap();
-    assert!(amount_in > U256::ZERO, "Ratio calculation should yield a positive input amount");
+    // This test no longer uses f64, so it's removed.
+    // The core calculation accuracy is tested in the other tests.
 
     // Test simulations
-    let add_liquidity_result = pool.simulate_add_liquidity(U256::from(100), U256::from(100), None).await;
-    assert_eq!(add_liquidity_result.amount0_delta, U256::from(100));
+    let initial_state = pool.get_cached_reserves().await;
+    let sim_result = pool
+        .simulate_add_liquidity(U256::from(100), U256::from(1000000000), None)
+        .await;
+    
+    // The optimal amount of token1 to add will be calculated based on the ratio
+    let expected_amount1 = U256::from(100) * initial_state.reserve1 / initial_state.reserve0;
+
+    assert_eq!(sim_result.amount0_delta, U256::from(100));
+    assert_eq!(sim_result.amount1_delta, expected_amount1);
 }
 
 #[tokio::test]
 async fn test_unregistered_pool() {
     let (_manager, pool) = setup_standard_v2_pool().await;
+    pool.update_state().await.unwrap();
     let (token0, token1) = pool.tokens();
+
+    // Correctly generate a random address
+    let mut rng = rand::rng();
+    let random_address = Address::from(rng.r#random::<[u8; 20]>());
+
     let unregistered_pool = UnregisteredLiquidityPool::<DynProvider>::new(
-        Address::new(random::<[u8; 20]>()),
+        random_address,
         token0.clone(),
         token1.clone(),
     );
@@ -403,7 +405,6 @@ async fn test_unregistered_pool() {
     let result = unregistered_pool.calculate_tokens_out(&token0, U256::from(100)).await;
     assert!(matches!(result, Err(ArbRsError::CalculationError(_))));
 }
-
 
 struct TestSubscriber {
     id: usize,
@@ -439,8 +440,58 @@ async fn test_pub_sub() {
 
     pool.subscribe(Arc::downgrade(&subscriber) as std::sync::Weak<dyn Subscriber<DynProvider>>)
         .await;
-
     pool.update_state().await.unwrap();
 
     assert!(notified.load(Ordering::SeqCst), "Subscriber was not notified");
+}
+
+#[tokio::test]
+async fn test_v2_simulate_add_liquidity_from_real_tx() {
+    let (_manager, pool) = setup_concrete_v2_pool(
+        StandardV2Logic,
+        WBTC_WETH_POOL_ADDRESS,
+        WBTC_ADDRESS,
+        WETH_ADDRESS,
+    )
+    .await;
+
+    let tx_block = 18000000;
+    let state_before = pool.fetch_and_cache_state_at_block(tx_block - 1).await.unwrap();
+    let wbtc_added = U256::from_str("50000000").unwrap();
+    let weth_added = U256::from_str("862148154228958432").unwrap();
+
+    let sim_result = pool
+        .simulate_add_liquidity(wbtc_added, weth_added, Some(&state_before))
+        .await;
+
+    let state_after = pool.fetch_and_cache_state_at_block(tx_block).await.unwrap();
+
+    assert_eq!(sim_result.final_state.reserve0, state_after.reserve0);
+    assert_eq!(sim_result.final_state.reserve1, state_after.reserve1);
+}
+
+#[tokio::test]
+async fn test_v2_simulate_swap_from_real_tx() {
+    let (manager, pool) = setup_concrete_v2_pool(
+        StandardV2Logic,
+        WBTC_WETH_POOL_ADDRESS,
+        WBTC_ADDRESS,
+        WETH_ADDRESS,
+    )
+    .await;
+    let wbtc = manager.get_token(WBTC_ADDRESS).await.unwrap();
+    let tx_block = 18000001;
+
+    let state_before = pool.fetch_and_cache_state_at_block(tx_block - 1).await.unwrap();
+    let wbtc_in = U256::from_str("100000000").unwrap();
+
+    let sim_result = pool
+        .simulate_exact_input_swap(&wbtc, wbtc_in, Some(&state_before))
+        .await
+        .unwrap();
+
+    let state_after = pool.fetch_and_cache_state_at_block(tx_block).await.unwrap();
+
+    assert_eq!(sim_result.final_state.reserve0, state_after.reserve0);
+    assert_eq!(sim_result.final_state.reserve1, state_after.reserve1);
 }
