@@ -10,6 +10,8 @@ use std::sync::Arc;
 pub mod strategy;
 pub mod uniswap_v2;
 pub mod uniswap_v2_simulation;
+pub mod uniswap_v3;
+pub mod uniswap_v3_snapshot;
 
 #[async_trait]
 pub trait LiquidityPool<P: Provider + Send + Sync + 'static + ?Sized>: Debug + Send + Sync {

@@ -12,14 +12,14 @@ use std::sync::Arc;
 
 type PoolRegistry<P> = DashMap<Address, Arc<dyn LiquidityPool<P>>>;
 
-pub struct PoolManager<P: Provider + Send + Sync + 'static + ?Sized> {
+pub struct UniswapV2PoolManager<P: Provider + Send + Sync + 'static + ?Sized> {
     token_manager: Arc<TokenManager<P>>,
     _dex_registry: HashMap<Address, DexDetails>,
     pool_registry: Arc<PoolRegistry<P>>,
     provider: Arc<P>,
 }
 
-impl<P: Provider + Send + Sync + 'static + ?Sized> PoolManager<P> {
+impl<P: Provider + Send + Sync + 'static + ?Sized> UniswapV2PoolManager<P> {
     pub fn new(token_manager: Arc<TokenManager<P>>, provider: Arc<P>) -> Self {
         Self {
             token_manager,

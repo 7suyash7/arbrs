@@ -1,8 +1,8 @@
-use alloy_primitives::{address, b256, Address, B256, I256, U256};
+use alloy_primitives::{address, b256, Address, B256,U256};
 use alloy_provider::{Provider, ProviderBuilder};
 use arbrs::core::token::TokenLike;
 use arbrs::dex::DexVariant;
-use arbrs::manager::pool_manager::PoolManager;
+use arbrs::manager::uniswap_v2_pool_manager::UniswapV2PoolManager;
 use arbrs::manager::token_manager::TokenManager;
 use arbrs::ArbRsError;
 use arbrs::pool::LiquidityPool;
@@ -78,12 +78,12 @@ async fn setup_standard_v2_pool() -> (
     (manager, pool as Arc<dyn LiquidityPool<DynProvider>>)
 }
 
-async fn setup_pool_manager() -> PoolManager<DynProvider> {
+async fn setup_pool_manager() -> UniswapV2PoolManager<DynProvider> {
     let url = Url::parse(FORK_RPC_URL).expect("Failed to parse RPC URL");
     let provider = ProviderBuilder::new().connect_http(url);
     let provider_arc: Arc<DynProvider> = Arc::new(provider);
     let token_manager = Arc::new(TokenManager::new(provider_arc.clone(), 1));
-    PoolManager::new(token_manager, provider_arc)
+    UniswapV2PoolManager::new(token_manager, provider_arc)
 }
 
 #[tokio::test]

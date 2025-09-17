@@ -1,7 +1,7 @@
 use alloy_primitives::Address;
 use thiserror::Error;
 
-#[derive(Error, Debug, PartialEq, Eq)]
+#[derive(Error, Debug, PartialEq)]
 pub enum ArbRsError {
     #[error("Provider error: {0}")]
     ProviderError(String),
@@ -29,4 +29,7 @@ pub enum ArbRsError {
         attempted_block: u64,
         latest_block: u64,
     },
+
+    #[error("ABI Decode Error: {0}")]
+    SolAbiError(#[from] alloy_sol_types::Error),
 }
