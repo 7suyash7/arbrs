@@ -4,7 +4,8 @@ use crate::errors::ArbRsError;
 use crate::pool::strategy::V2CalculationStrategy;
 use crate::pool::uniswap_v2_simulation::UniswapV2PoolSimulationResult;
 use crate::pool::LiquidityPool;
-use alloy_primitives::{Address, B256, Bytes, TxKind, U256, keccak256};
+use crate::math::v3::full_math;
+use alloy_primitives::{Address, B256, Bytes, I256, TxKind, U256, keccak256}; // Import I256
 use alloy_provider::Provider;
 use alloy_rpc_types::{BlockId, BlockNumberOrTag, TransactionRequest};
 use alloy_sol_types::{SolCall, sol};
@@ -54,7 +55,7 @@ impl<P: Provider + Send + Sync + 'static + ?Sized, S: V2CalculationStrategy + 's
             if let Some(sub) = weak_sub.upgrade() {
                 sub.id() != subscriber_id
             } else {
-                false // Remove dead weak pointers
+                false // remove dead weak pointers
             }
         });
     }
@@ -256,26 +257,37 @@ impl<P: Provider + Send + Sync + ?Sized + 'static, S: V2CalculationStrategy> Uni
     }
 
     pub async fn simulate_add_liquidity(
-    &self,
-    added_reserves_token0: U256,
-    added_reserves_token1: U256,
-    override_state: Option<&UniswapV2PoolState>,
+        &self,
+        added_reserves_token0: U256,
+        added_reserves_token1: U256,
+        override_state: Option<&UniswapV2PoolState>,
     ) -> UniswapV2PoolSimulationResult {
         let state_guard = self.state.read().await;
         let initial_state = override_state.unwrap_or(&state_guard);
+
+        println!("[ADD LIQ SIM] Initial Reserves: r0={}, r1={}", initial_state.reserve0, initial_state.reserve1);
 
         let (amount0_actual, amount1_actual) = if initial_state.reserve0 == U256::ZERO
             && initial_state.reserve1 == U256::ZERO
         {
             (added_reserves_token0, added_reserves_token1)
         } else {
-            let amount1_optimal =
-                added_reserves_token0 * initial_state.reserve1 / initial_state.reserve0;
+            let amount1_optimal = full_math::mul_div(
+                added_reserves_token0,
+                initial_state.reserve1,
+                initial_state.reserve0,
+            )
+            .unwrap_or(U256::MAX);
+
             if amount1_optimal <= added_reserves_token1 {
                 (added_reserves_token0, amount1_optimal)
             } else {
-                let amount0_optimal =
-                    added_reserves_token1 * initial_state.reserve0 / initial_state.reserve1;
+                let amount0_optimal = full_math::mul_div(
+                    added_reserves_token1,
+                    initial_state.reserve0,
+                    initial_state.reserve1,
+                )
+                .unwrap_or(U256::MAX);
                 (amount0_optimal, added_reserves_token1)
             }
         };
@@ -287,8 +299,8 @@ impl<P: Provider + Send + Sync + ?Sized + 'static, S: V2CalculationStrategy> Uni
         };
 
         UniswapV2PoolSimulationResult {
-            amount0_delta: amount0_actual,
-            amount1_delta: amount1_actual,
+            amount0_delta: I256::from_raw(amount0_actual),
+            amount1_delta: I256::from_raw(amount1_actual),
             initial_state: initial_state.clone(),
             final_state,
         }
@@ -304,14 +316,14 @@ impl<P: Provider + Send + Sync + ?Sized + 'static, S: V2CalculationStrategy> Uni
         let initial_state = override_state.unwrap_or(&state_guard);
 
         let final_state = UniswapV2PoolState {
-            reserve0: initial_state.reserve0 - removed_reserves_token0,
-            reserve1: initial_state.reserve1 - removed_reserves_token1,
+            reserve0: initial_state.reserve0.saturating_sub(removed_reserves_token0),
+            reserve1: initial_state.reserve1.saturating_sub(removed_reserves_token1),
             block_number: initial_state.block_number,
         };
 
         UniswapV2PoolSimulationResult {
-            amount0_delta: U256::ZERO - removed_reserves_token0,
-            amount1_delta: U256::ZERO - removed_reserves_token1,
+            amount0_delta: -I256::from_raw(removed_reserves_token0),
+            amount1_delta: -I256::from_raw(removed_reserves_token1),
             initial_state: initial_state.clone(),
             final_state,
         }
@@ -327,18 +339,34 @@ impl<P: Provider + Send + Sync + ?Sized + 'static, S: V2CalculationStrategy> Uni
         let state_guard = self.state.read().await;
         let initial_state = override_state.unwrap_or(&state_guard);
 
+        println!("[SWAP SIM] Initial Reserves: r0={}, r1={}", initial_state.reserve0, initial_state.reserve1);
+
         let token_out_quantity = self
             .calculate_tokens_out_with_override(token_in, token_in_quantity, initial_state)?;
-            
-        let (amount0_delta, amount1_delta) = if token_in.address() == self.token0.address() {
-            (token_in_quantity, U256::ZERO - token_out_quantity)
+
+        let (final_reserve0, final_reserve1, amount0_delta, amount1_delta) = if token_in.address() == self.token0.address() {
+            (
+                initial_state.reserve0 + token_in_quantity,
+                initial_state.reserve1.checked_sub(token_out_quantity).ok_or(
+                    ArbRsError::CalculationError("Swap would drain reserve1".to_string()),
+                )?,
+                I256::from_raw(token_in_quantity),
+                -I256::from_raw(token_out_quantity)
+            )
         } else {
-            (U256::ZERO - token_out_quantity, token_in_quantity)
+            (
+                initial_state.reserve0.checked_sub(token_out_quantity).ok_or(
+                    ArbRsError::CalculationError("Swap would drain reserve0".to_string()),
+                )?,
+                initial_state.reserve1 + token_in_quantity,
+                -I256::from_raw(token_out_quantity),
+                I256::from_raw(token_in_quantity)
+            )
         };
 
         let final_state = UniswapV2PoolState {
-            reserve0: initial_state.reserve0 + amount0_delta,
-            reserve1: initial_state.reserve1 + amount1_delta,
+            reserve0: final_reserve0,
+            reserve1: final_reserve1,
             block_number: initial_state.block_number,
         };
 
@@ -365,16 +393,30 @@ impl<P: Provider + Send + Sync + ?Sized + 'static, S: V2CalculationStrategy> Uni
             token_out_quantity,
             initial_state,
         )?;
-        
-        let (amount0_delta, amount1_delta) = if token_out.address() == self.token1.address() {
-            (token_in_quantity, U256::ZERO - token_out_quantity)
+
+        let (final_reserve0, final_reserve1, amount0_delta, amount1_delta) = if token_out.address() == self.token1.address() {
+            (
+                initial_state.reserve0 + token_in_quantity,
+                initial_state.reserve1.checked_sub(token_out_quantity).ok_or(
+                    ArbRsError::CalculationError("Swap would drain reserve1".to_string()),
+                )?,
+                I256::from_raw(token_in_quantity),
+                -I256::from_raw(token_out_quantity)
+            )
         } else {
-            (U256::ZERO - token_out_quantity, token_in_quantity)
+            (
+                initial_state.reserve0.checked_sub(token_out_quantity).ok_or(
+                    ArbRsError::CalculationError("Swap would drain reserve0".to_string()),
+                )?,
+                initial_state.reserve1 + token_in_quantity,
+                -I256::from_raw(token_out_quantity),
+                I256::from_raw(token_in_quantity)
+            )
         };
         
         let final_state = UniswapV2PoolState {
-            reserve0: initial_state.reserve0 + amount0_delta,
-            reserve1: initial_state.reserve1 + amount1_delta,
+            reserve0: final_reserve0,
+            reserve1: final_reserve1,
             block_number: initial_state.block_number,
         };
 
