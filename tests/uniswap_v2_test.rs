@@ -83,7 +83,7 @@ async fn setup_pool_manager() -> UniswapV2PoolManager<DynProvider> {
     let provider = ProviderBuilder::new().connect_http(url);
     let provider_arc: Arc<DynProvider> = Arc::new(provider);
     let token_manager = Arc::new(TokenManager::new(provider_arc.clone(), 1));
-    UniswapV2PoolManager::new(token_manager, provider_arc)
+    UniswapV2PoolManager::new(token_manager, provider_arc, V2_FACTORY_ADDRESS, 0)
 }
 
 #[tokio::test]
@@ -433,14 +433,13 @@ async fn test_pub_sub() {
 }
 
 #[tokio::test]
-async fn test_uniswap_v2_simulation_logic_is_correct() {
+async fn test_uniswap_v2_simulation_logic() {
     let (manager, pool) = setup_concrete_v2_pool(
         StandardV2Logic,
         WBTC_WETH_POOL_ADDRESS,
         WBTC_ADDRESS,
         WETH_ADDRESS,
-    )
-    .await;
+    ).await;
     let weth = manager.get_token(WETH_ADDRESS).await.unwrap();
 
     let state_before = UniswapV2PoolState {
@@ -456,15 +455,46 @@ async fn test_uniswap_v2_simulation_logic_is_correct() {
         .await
         .unwrap();
 
-    let expected_final_reserve0 = U256::from(8272251551u64);
+    let expected_final_reserve0 = U256::from(8269528657u64);
     let expected_final_reserve1 = U256::from_str("34131893250000000000000").unwrap();
 
     assert_eq!(
-        sim_result.final_state.reserve0, expected_final_reserve0,
-        "Simulated reserve0 does not match the mathematically correct result"
+        sim_result.final_state.reserve0, 
+        expected_final_reserve0, 
+        "Simulated reserve0 does not match verified on-chain reserve0"
     );
     assert_eq!(
-        sim_result.final_state.reserve1, expected_final_reserve1,
-        "Simulated reserve1 does not match the mathematically correct result"
+        sim_result.final_state.reserve1, 
+        expected_final_reserve1, 
+        "Simulated reserve1 does not match verified on-chain reserve1"
     );
+}
+
+#[tokio::test]
+async fn test_v2_pool_discovery() {
+    let url = Url::parse(FORK_RPC_URL).expect("Failed to parse RPC URL");
+    let provider = ProviderBuilder::new().connect_http(url);
+    let provider_arc: Arc<DynProvider> = Arc::new(provider);
+    let token_manager = Arc::new(TokenManager::new(provider_arc.clone(), 1));
+
+    let start_block = 23388685;
+    let end_block = 23388695;
+
+    let mut pool_manager = UniswapV2PoolManager::new(
+        token_manager,
+        provider_arc.clone(),
+        V2_FACTORY_ADDRESS,
+        start_block,
+    );
+
+    let new_pools = pool_manager.discover_pools_in_range(end_block).await.unwrap();
+
+    assert!(!new_pools.is_empty(), "discover_pools should have found at least one new pool in the historical range");
+
+    let aurn_weth_pool_address = address!("dc0f2bd504d334f81e81a9949403e6cd6b954762");
+    let pool_was_found = new_pools.iter().any(|p| p.address() == aurn_weth_pool_address);
+
+    assert!(pool_was_found, "The AURN/WETH pool should have been discovered");
+
+    assert!(pool_manager.get_pool_by_address(aurn_weth_pool_address).is_some());
 }

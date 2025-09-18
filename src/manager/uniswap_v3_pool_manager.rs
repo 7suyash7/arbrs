@@ -1,9 +1,10 @@
 use crate::errors::ArbRsError;
+use crate::manager::pool_discovery::discover_new_v3_pools;
 use crate::manager::token_manager::TokenManager;
 use crate::pool::{
     LiquidityPool,
-    uniswap_v3::{TickInfo, UniswapV3Pool},
-    uniswap_v3_snapshot::{LiquidityMap, UniswapV3LiquiditySnapshot},
+    uniswap_v3::UniswapV3Pool,
+    uniswap_v3_snapshot::UniswapV3LiquiditySnapshot,
 };
 use alloy_primitives::Address;
 use alloy_provider::Provider;
@@ -18,6 +19,8 @@ pub struct UniswapV3PoolManager<P: Provider + Send + Sync + 'static + ?Sized> {
     pool_registry: Arc<PoolRegistry<P>>,
     provider: Arc<P>,
     liquidity_snapshot: Arc<RwLock<UniswapV3LiquiditySnapshot<P>>>,
+    factory_address: Address,
+    pub last_discovery_block: u64,
 }
 
 impl<P: Provider + Send + Sync + 'static + ?Sized> UniswapV3PoolManager<P> {
@@ -26,6 +29,7 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> UniswapV3PoolManager<P> {
         provider: Arc<P>,
         chain_id: u64,
         start_block: u64,
+        factory_address: Address,
     ) -> Self {
         Self {
             token_manager,
@@ -36,6 +40,8 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> UniswapV3PoolManager<P> {
                 chain_id,
                 start_block,
             ))),
+            factory_address,
+            last_discovery_block: start_block,
         }
     }
 
@@ -86,5 +92,33 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> UniswapV3PoolManager<P> {
 
         self.pool_registry.insert(pool_address, pool.clone());
         Ok(pool)
+    }
+
+    pub async fn discover_pools_in_range(&mut self, end_block: u64) -> Result<Vec<Arc<dyn LiquidityPool<P>>>, ArbRsError> {
+        if end_block <= self.last_discovery_block {
+            return Ok(Vec::new());
+        }
+
+        let discovered_pools_data = discover_new_v3_pools(
+            self.provider.clone(),
+            self.factory_address,
+            self.last_discovery_block + 1,
+            end_block,
+        ).await?;
+
+        let mut new_pools = Vec::new();
+        for pool_data in discovered_pools_data {
+            let pool = self.build_pool(
+                pool_data.pool_address,
+                pool_data.token0,
+                pool_data.token1,
+                pool_data.fee,
+                pool_data.tick_spacing,
+            ).await?;
+            new_pools.push(pool);
+        }
+
+        self.last_discovery_block = end_block;
+        Ok(new_pools)
     }
 }

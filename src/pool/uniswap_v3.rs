@@ -504,6 +504,14 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> UniswapV3Pool<P> {
             final_state,
         })
     }
+
+    pub fn fee(&self) -> u32 {
+        self.fee
+    }
+
+    pub fn tick_spacing(&self) -> i32 {
+        self.tick_spacing
+    }
 }
 
 #[async_trait]

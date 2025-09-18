@@ -5,7 +5,7 @@ use alloy_rpc_types::TransactionRequest;
 use alloy_sol_types::SolCall;
 use arbrs::pool::uniswap_v3_snapshot::UniswapV3LiquiditySnapshot;
 use arbrs::TokenLike;
-use arbrs::core::token::{NativeTokenData, Token};
+use arbrs::core::token::Token;
 use arbrs::pool::LiquidityPool;
 use arbrs::pool::uniswap_v3::UniswapV3Pool;
 use serde_json::Value;
@@ -22,17 +22,16 @@ use arbrs::{
         utils::sqrt,
     },
 };
-use ruint::Uint;
 use std::collections::BTreeMap;
 use std::str::FromStr;
 use std::sync::Arc;
 use url::Url;
 
 const FORK_RPC_URL: &str = "http://127.0.0.1:8545";
-// const FORK_RPC_URL: &str = "https://mainnet.infura.io/v3/c7b5a0a09cb445fa963c5e11b817d150";
 const WBTC_WETH_V3_POOL_ADDRESS: Address = address!("CBCdF9626bC03E24f779434178A73a0B4bad62eD");
 const WETH_ADDRESS: Address = address!("C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2");
 const WBTC_ADDRESS: Address = address!("2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599");
+const V3_FACTORY_ADDRESS: Address = address!("1F98431c8aD98523631AE4a59f267346ea31F984");
 const EMPTY_SNAPSHOT_BLOCK: u64 = 12_369_620;
 
 sol! {
@@ -82,8 +81,15 @@ async fn setup_v3_pool_manager() -> (
     let provider = ProviderBuilder::new().connect_http(url);
     let provider_arc: Arc<DynProvider> = Arc::new(provider);
     let token_manager = Arc::new(TokenManager::new(provider_arc.clone(), 1));
-    let pool_manager = UniswapV3PoolManager::new(token_manager.clone(), provider_arc, 1, 0);
+    let pool_manager = UniswapV3PoolManager::new(
+        token_manager.clone(), 
+        provider_arc, 
+        1,
+        0,
+        V3_FACTORY_ADDRESS,
+    );
     (token_manager, pool_manager)
+
 }
 
 fn e18(n: u64) -> U256 {
@@ -626,7 +632,7 @@ async fn test_pool_manager_applies_snapshot_from_file() {
 
     let (_token_manager, provider) = {
         let url = Url::parse(FORK_RPC_URL).expect("Failed to parse RPC URL");
-        let provider = ProviderBuilder::new().on_http(url);
+        let provider = ProviderBuilder::new().connect_http(url);
         let provider_arc: Arc<DynProvider> = Arc::new(provider);
         let token_manager = Arc::new(TokenManager::new(provider_arc.clone(), 1));
         (token_manager, provider_arc)
@@ -648,4 +654,42 @@ async fn test_pool_manager_applies_snapshot_from_file() {
     let state = pool.state.read().await;
     assert_eq!(state.tick_bitmap, tick_bitmap);
     assert_eq!(state.tick_data, tick_data);
+}
+
+#[tokio::test]
+async fn test_v3_pool_discovery() {
+    // 1. Setup provider to connect to your Anvil fork
+    let url = Url::parse(FORK_RPC_URL).expect("Failed to parse RPC URL");
+    let provider = ProviderBuilder::new().connect_http(url);
+    let provider_arc: Arc<DynProvider> = Arc::new(provider);
+    let token_manager = Arc::new(TokenManager::new(provider_arc.clone(), 1));
+
+    let start_block = 13616453;
+    let end_block = 13616454;
+
+    let mut pool_manager = UniswapV3PoolManager::new(
+        token_manager,
+        provider_arc.clone(),
+        1,
+        start_block,
+        V3_FACTORY_ADDRESS,
+    );
+
+    let new_pools = pool_manager.discover_pools_in_range(end_block).await.unwrap();
+
+    assert!(!new_pools.is_empty(), "discover_pools should have found the USDC/WETH 0.01% pool");
+
+    let usdc_weth_pool_address = address!("e0554a476A092703abdB3Ef35c80e0D76d32939F");
+    let discovered_pool = new_pools
+        .iter()
+        .find(|p| p.address() == usdc_weth_pool_address)
+        .expect("The USDC/WETH 0.01% pool should have been discovered");
+
+    let concrete_pool = discovered_pool
+        .as_any()
+        .downcast_ref::<UniswapV3Pool<DynProvider>>()
+        .expect("Discovered pool should be a UniswapV3Pool");
+
+    assert_eq!(concrete_pool.fee(), 100);
+    assert_eq!(concrete_pool.tick_spacing(), 1);
 }
