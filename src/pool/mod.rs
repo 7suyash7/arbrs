@@ -46,6 +46,10 @@ pub trait LiquidityPool<P: Provider + Send + Sync + 'static + ?Sized>: Debug + S
     /// Price a_to_b = reserve_b / reserve_a
     async fn absolute_price(&self) -> Result<f64, ArbRsError>;
 
+    /// Calculates the "absolute exchange rate" of token1 in terms of token0, without decimal scaling.
+    /// Rate b_to_a = reserve_a / reserve_b
+    async fn absolute_exchange_rate(&self) -> Result<f64, ArbRsError>;
+
     /// Downcasting methjod
     fn as_any(&self) -> &dyn Any;
 }

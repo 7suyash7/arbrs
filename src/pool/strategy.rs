@@ -14,10 +14,7 @@ pub trait V2CalculationStrategy: Debug + Send + Sync {
         reserve_out: U256,
         amount_in: U256,
     ) -> Result<U256, ArbRsError> {
-        if amount_in == U256::ZERO
-            || reserve_in == U256::ZERO
-            || reserve_out == U256::ZERO
-        {
+        if amount_in == U256::ZERO || reserve_in == U256::ZERO || reserve_out == U256::ZERO {
             return Err(ArbRsError::CalculationError("Invalid input".into()));
         }
 
@@ -49,10 +46,7 @@ pub trait V2CalculationStrategy: Debug + Send + Sync {
         reserve_out: U256,
         amount_out: U256,
     ) -> Result<U256, ArbRsError> {
-        if amount_out == U256::ZERO
-            || reserve_in == U256::ZERO
-            || reserve_out == U256::ZERO
-        {
+        if amount_out == U256::ZERO || reserve_in == U256::ZERO || reserve_out == U256::ZERO {
             return Err(ArbRsError::CalculationError("Invalid input".into()));
         }
         if amount_out >= reserve_out {
@@ -71,10 +65,12 @@ pub trait V2CalculationStrategy: Debug + Send + Sync {
             reserve_out.saturating_sub(amount_out),
         )
         .ok_or_else(|| ArbRsError::CalculationError("mul_div for tmp failed".to_string()))?;
-        
-        let amount_in = full_math::mul_div(tmp, fee_denominator, fee_numerator)
-            .ok_or_else(|| ArbRsError::CalculationError("mul_div for final amount failed".to_string()))?;
-        
+
+        let amount_in =
+            full_math::mul_div(tmp, fee_denominator, fee_numerator).ok_or_else(|| {
+                ArbRsError::CalculationError("mul_div for final amount failed".to_string())
+            })?;
+
         Ok(amount_in.saturating_add(U256::from(1)))
     }
 

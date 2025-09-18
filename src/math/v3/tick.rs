@@ -1,5 +1,5 @@
-use alloy_primitives::I256;
 use super::constants::{MAX_TICK, MIN_TICK};
+use alloy_primitives::I256;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Tick {
@@ -36,7 +36,9 @@ pub fn tick_spacing_to_max_liquidity_per_tick(tick_spacing: i32) -> u128 {
     let min_tick = get_min_tick(tick_spacing);
     let max_tick = get_max_tick(tick_spacing);
     let num_ticks = ((max_tick - min_tick) / tick_spacing) as u128 + 1;
-    if num_ticks == 0 { return 0; }
+    if num_ticks == 0 {
+        return 0;
+    }
     u128::MAX / num_ticks
 }
 

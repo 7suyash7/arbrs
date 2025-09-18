@@ -29,6 +29,9 @@ mod tests {
         assert_eq!(sqrt(U256::from(4)), U256::from(2));
         assert_eq!(sqrt(U256::from(16)), U256::from(4));
         assert_eq!(sqrt(U256::from(17)), U256::from(4));
-        assert_eq!(sqrt(U256::MAX).to_string(), "340282366920938463463374607431768211455");
+        assert_eq!(
+            sqrt(U256::MAX).to_string(),
+            "340282366920938463463374607431768211455"
+        );
     }
 }

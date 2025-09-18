@@ -1,20 +1,20 @@
-use alloy_primitives::{address, b256, Address, B256,U256};
+use alloy_primitives::{Address, B256, U256, address, b256};
 use alloy_provider::{Provider, ProviderBuilder};
+use arbrs::ArbRsError;
+use arbrs::core::messaging::{Publisher, PublisherMessage, Subscriber};
 use arbrs::core::token::TokenLike;
 use arbrs::dex::DexVariant;
-use arbrs::manager::uniswap_v2_pool_manager::UniswapV2PoolManager;
 use arbrs::manager::token_manager::TokenManager;
-use arbrs::ArbRsError;
+use arbrs::manager::uniswap_v2_pool_manager::UniswapV2PoolManager;
 use arbrs::pool::LiquidityPool;
 use arbrs::pool::strategy::{PancakeV2Logic, StandardV2Logic, V2CalculationStrategy};
 use arbrs::pool::uniswap_v2::{UniswapV2Pool, UniswapV2PoolState, UnregisteredLiquidityPool};
-use arbrs::core::messaging::{Publisher, Subscriber, PublisherMessage};
 use async_trait::async_trait;
-use std::sync::atomic::{AtomicBool, Ordering};
+use rand::Rng;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use url::Url;
-use rand::Rng;
 
 const WETH_ADDRESS: Address = address!("C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2");
 const WBTC_ADDRESS: Address = address!("2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599");
@@ -340,7 +340,8 @@ async fn test_state_caching_and_management() {
         WBTC_WETH_POOL_ADDRESS,
         WBTC_ADDRESS,
         WETH_ADDRESS,
-    ).await;
+    )
+    .await;
 
     pool.update_state().await.unwrap();
     let initial_state = pool.get_cached_reserves().await;
@@ -349,13 +350,23 @@ async fn test_state_caching_and_management() {
     let next_block = initial_state.block_number + 1;
     let _ = pool.restore_state_before_block(next_block).await;
 
-    assert_eq!(pool.get_cached_reserves().await.block_number, initial_state.block_number);
+    assert_eq!(
+        pool.get_cached_reserves().await.block_number,
+        initial_state.block_number
+    );
 
-    pool.discard_states_before_block(initial_state.block_number).await;
-    assert_eq!(pool.get_cached_reserves().await.block_number, initial_state.block_number);
+    pool.discard_states_before_block(initial_state.block_number)
+        .await;
+    assert_eq!(
+        pool.get_cached_reserves().await.block_number,
+        initial_state.block_number
+    );
 
     pool.discard_states_before_block(next_block).await;
-    assert_eq!(pool.get_cached_reserves().await.block_number, initial_state.block_number);
+    assert_eq!(
+        pool.get_cached_reserves().await.block_number,
+        initial_state.block_number
+    );
 }
 
 #[tokio::test]
@@ -373,7 +384,9 @@ async fn test_unregistered_pool() {
         token1.clone(),
     );
 
-    let result = unregistered_pool.calculate_tokens_out(&token0, U256::from(100)).await;
+    let result = unregistered_pool
+        .calculate_tokens_out(&token0, U256::from(100))
+        .await;
     assert!(matches!(result, Err(ArbRsError::CalculationError(_))));
 }
 
@@ -413,7 +426,10 @@ async fn test_pub_sub() {
         .await;
     pool.update_state().await.unwrap();
 
-    assert!(notified.load(Ordering::SeqCst), "Subscriber was not notified");
+    assert!(
+        notified.load(Ordering::SeqCst),
+        "Subscriber was not notified"
+    );
 }
 
 #[tokio::test]
@@ -423,7 +439,8 @@ async fn test_uniswap_v2_simulation_logic_is_correct() {
         WBTC_WETH_POOL_ADDRESS,
         WBTC_ADDRESS,
         WETH_ADDRESS,
-    ).await;
+    )
+    .await;
     let weth = manager.get_token(WETH_ADDRESS).await.unwrap();
 
     let state_before = UniswapV2PoolState {
@@ -443,13 +460,11 @@ async fn test_uniswap_v2_simulation_logic_is_correct() {
     let expected_final_reserve1 = U256::from_str("34131893250000000000000").unwrap();
 
     assert_eq!(
-        sim_result.final_state.reserve0, 
-        expected_final_reserve0, 
+        sim_result.final_state.reserve0, expected_final_reserve0,
         "Simulated reserve0 does not match the mathematically correct result"
     );
     assert_eq!(
-        sim_result.final_state.reserve1, 
-        expected_final_reserve1, 
+        sim_result.final_state.reserve1, expected_final_reserve1,
         "Simulated reserve1 does not match the mathematically correct result"
     );
 }

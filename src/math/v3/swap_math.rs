@@ -32,12 +32,23 @@ pub fn compute_swap_step(
             amount_remaining.into_raw(),
             U256::from(1_000_000 - fee_pips),
             U256::from(1_000_000),
-        ).ok_or(ArbRsError::UniswapV3MathError("mul_div failed".into()))?;
+        )
+        .ok_or(ArbRsError::UniswapV3MathError("mul_div failed".into()))?;
 
         let amount_in_to_target = if zero_for_one {
-            sqrt_price_math::get_amount0_delta(sqrt_ratio_target_x96, sqrt_ratio_current_x96, liquidity, true)?
+            sqrt_price_math::get_amount0_delta(
+                sqrt_ratio_target_x96,
+                sqrt_ratio_current_x96,
+                liquidity,
+                true,
+            )?
         } else {
-            sqrt_price_math::get_amount1_delta(sqrt_ratio_current_x96, sqrt_ratio_target_x96, liquidity, true)?
+            sqrt_price_math::get_amount1_delta(
+                sqrt_ratio_current_x96,
+                sqrt_ratio_target_x96,
+                liquidity,
+                true,
+            )?
         };
 
         if amount_remaining_less_fee >= amount_in_to_target {
@@ -52,20 +63,39 @@ pub fn compute_swap_step(
                 zero_for_one,
             )?;
         }
-        
-        amount_out = if zero_for_one {
-            sqrt_price_math::get_amount1_delta(sqrt_ratio_next_x96, sqrt_ratio_current_x96, liquidity, false)?
-        } else {
-            sqrt_price_math::get_amount0_delta(sqrt_ratio_current_x96, sqrt_ratio_next_x96, liquidity, false)?
-        };
 
+        amount_out = if zero_for_one {
+            sqrt_price_math::get_amount1_delta(
+                sqrt_ratio_next_x96,
+                sqrt_ratio_current_x96,
+                liquidity,
+                false,
+            )?
+        } else {
+            sqrt_price_math::get_amount0_delta(
+                sqrt_ratio_current_x96,
+                sqrt_ratio_next_x96,
+                liquidity,
+                false,
+            )?
+        };
     } else {
         let amount_out_to_target = if zero_for_one {
-            sqrt_price_math::get_amount1_delta(sqrt_ratio_target_x96, sqrt_ratio_current_x96, liquidity, false)?
+            sqrt_price_math::get_amount1_delta(
+                sqrt_ratio_target_x96,
+                sqrt_ratio_current_x96,
+                liquidity,
+                false,
+            )?
         } else {
-            sqrt_price_math::get_amount0_delta(sqrt_ratio_current_x96, sqrt_ratio_target_x96, liquidity, false)?
+            sqrt_price_math::get_amount0_delta(
+                sqrt_ratio_current_x96,
+                sqrt_ratio_target_x96,
+                liquidity,
+                false,
+            )?
         };
-        
+
         if (-amount_remaining).into_raw() >= amount_out_to_target {
             sqrt_ratio_next_x96 = sqrt_ratio_target_x96;
             amount_out = amount_out_to_target;
@@ -80,9 +110,19 @@ pub fn compute_swap_step(
         }
 
         amount_in = if zero_for_one {
-            sqrt_price_math::get_amount0_delta(sqrt_ratio_next_x96, sqrt_ratio_current_x96, liquidity, true)?
+            sqrt_price_math::get_amount0_delta(
+                sqrt_ratio_next_x96,
+                sqrt_ratio_current_x96,
+                liquidity,
+                true,
+            )?
         } else {
-            sqrt_price_math::get_amount1_delta(sqrt_ratio_current_x96, sqrt_ratio_next_x96, liquidity, true)?
+            sqrt_price_math::get_amount1_delta(
+                sqrt_ratio_current_x96,
+                sqrt_ratio_next_x96,
+                liquidity,
+                true,
+            )?
         };
     }
 
@@ -90,17 +130,37 @@ pub fn compute_swap_step(
 
     if zero_for_one {
         if !max || !exact_in {
-            amount_in = sqrt_price_math::get_amount0_delta(sqrt_ratio_next_x96, sqrt_ratio_current_x96, liquidity, true)?;
+            amount_in = sqrt_price_math::get_amount0_delta(
+                sqrt_ratio_next_x96,
+                sqrt_ratio_current_x96,
+                liquidity,
+                true,
+            )?;
         }
         if !max || exact_in {
-            amount_out = sqrt_price_math::get_amount1_delta(sqrt_ratio_next_x96, sqrt_ratio_current_x96, liquidity, false)?;
+            amount_out = sqrt_price_math::get_amount1_delta(
+                sqrt_ratio_next_x96,
+                sqrt_ratio_current_x96,
+                liquidity,
+                false,
+            )?;
         }
     } else {
         if !max || !exact_in {
-            amount_in = sqrt_price_math::get_amount1_delta(sqrt_ratio_current_x96, sqrt_ratio_next_x96, liquidity, true)?;
+            amount_in = sqrt_price_math::get_amount1_delta(
+                sqrt_ratio_current_x96,
+                sqrt_ratio_next_x96,
+                liquidity,
+                true,
+            )?;
         }
         if !max || exact_in {
-            amount_out = sqrt_price_math::get_amount0_delta(sqrt_ratio_current_x96, sqrt_ratio_next_x96, liquidity, false)?;
+            amount_out = sqrt_price_math::get_amount0_delta(
+                sqrt_ratio_current_x96,
+                sqrt_ratio_next_x96,
+                liquidity,
+                false,
+            )?;
         }
     }
 
@@ -115,7 +175,8 @@ pub fn compute_swap_step(
             amount_in,
             U256::from(fee_pips),
             U256::from(1_000_000 - fee_pips),
-        ).ok_or(ArbRsError::UniswapV3MathError("mul_div failed".into()))?
+        )
+        .ok_or(ArbRsError::UniswapV3MathError("mul_div failed".into()))?
     };
 
     Ok(SwapStep {

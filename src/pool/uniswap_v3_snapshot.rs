@@ -1,8 +1,8 @@
-use crate::{pool::uniswap_v3::{TickInfo}, ArbRsError};
+use crate::{ArbRsError, pool::uniswap_v3::TickInfo};
 use alloy_primitives::{Address, U256};
 use alloy_provider::Provider;
 use alloy_rpc_types::{Filter, Log as RpcLog};
-use alloy_sol_types::{sol, SolEvent};
+use alloy_sol_types::{SolEvent, sol};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -42,7 +42,7 @@ pub struct UniswapV3LiquiditySnapshot<P: ?Sized> {
     provider: Arc<P>,
     chain_id: u64,
     newest_block: u64,
-    liquidity_events: BTreeMap<Address, Vec<UniswapV3LiquidityEvent>>,
+    pub liquidity_events: BTreeMap<Address, Vec<UniswapV3LiquidityEvent>>,
     pub liquidity_snapshot: BTreeMap<Address, LiquidityMap>,
 }
 
@@ -63,7 +63,10 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> UniswapV3LiquiditySnapshot<P>
             return Ok(());
         }
 
-        println!("Updating Uniswap V3 snapshot from block {} to {}", self.newest_block, to_block);
+        println!(
+            "Updating Uniswap V3 snapshot from block {} to {}",
+            self.newest_block, to_block
+        );
 
         let mint_filter = Filter::new()
             .from_block(self.newest_block + 1)
@@ -87,7 +90,10 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> UniswapV3LiquiditySnapshot<P>
 
         for log in all_logs {
             let (pool_address, event) = self.process_log(&log)?;
-            self.liquidity_events.entry(pool_address).or_default().push(event);
+            self.liquidity_events
+                .entry(pool_address)
+                .or_default()
+                .push(event);
         }
 
         self.newest_block = to_block;
@@ -103,9 +109,15 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> UniswapV3LiquiditySnapshot<P>
             (decoded.amount as i128, decoded.tickLower, decoded.tickUpper)
         } else if topics[0] == Burn::SIGNATURE_HASH {
             let decoded = Burn::decode_log_data(&log.inner.data)?;
-            (-(decoded.amount as i128), decoded.tickLower, decoded.tickUpper)
+            (
+                -(decoded.amount as i128),
+                decoded.tickLower,
+                decoded.tickUpper,
+            )
         } else {
-            return Err(ArbRsError::AbiDecodeError("Unknown event signature".to_string()));
+            return Err(ArbRsError::AbiDecodeError(
+                "Unknown event signature".to_string(),
+            ));
         };
 
         Ok((
@@ -122,19 +134,23 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> UniswapV3LiquiditySnapshot<P>
     }
 
     /// Consumes pending liquidity updates for a pool, sorted chronologically.
-    pub fn pending_updates(&mut self, pool_address: Address) -> Vec<UniswapV3PoolLiquidityMappingUpdate> {
+    pub fn pending_updates(
+        &mut self,
+        pool_address: Address,
+    ) -> Vec<UniswapV3PoolLiquidityMappingUpdate> {
         if let Some(events) = self.liquidity_events.remove(&pool_address) {
             let mut sorted_events = events;
             sorted_events.sort_by_key(|e| (e.block_number, e.tx_index, e.log_index));
-            
-            sorted_events.into_iter().map(|event| {
-                UniswapV3PoolLiquidityMappingUpdate {
+
+            sorted_events
+                .into_iter()
+                .map(|event| UniswapV3PoolLiquidityMappingUpdate {
                     block_number: event.block_number,
                     liquidity: event.liquidity,
                     tick_lower: event.tick_lower,
                     tick_upper: event.tick_upper,
-                }
-            }).collect()
+                })
+                .collect()
         } else {
             Vec::new()
         }

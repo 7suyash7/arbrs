@@ -42,7 +42,6 @@ pub fn next_initialized_tick_within_one_word(
     None
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -60,7 +59,7 @@ mod tests {
         let (word_pos, bit_pos) = position(-230);
         assert_eq!(word_pos, -1);
         assert_eq!(bit_pos, 26);
-        
+
         let (word_pos, bit_pos) = position(230);
         assert_eq!(word_pos, 0);
         assert_eq!(bit_pos, 230);
@@ -75,14 +74,29 @@ mod tests {
         }
 
         let (word, _) = position(78);
-        let result = next_initialized_tick_within_one_word(bitmap.get(&word).copied().unwrap_or_default(), 78, 1, false);
+        let result = next_initialized_tick_within_one_word(
+            bitmap.get(&word).copied().unwrap_or_default(),
+            78,
+            1,
+            false,
+        );
         assert_eq!(result, Some((84, true)));
 
         let (word, _) = position(77);
-        let result = next_initialized_tick_within_one_word(bitmap.get(&word).copied().unwrap_or_default(), 77, 1, false);
+        let result = next_initialized_tick_within_one_word(
+            bitmap.get(&word).copied().unwrap_or_default(),
+            77,
+            1,
+            false,
+        );
         assert_eq!(result, Some((78, true)));
 
-        let result = next_initialized_tick_within_one_word(bitmap.get(&-1).copied().unwrap_or_default(), -257, 1, false);
+        let result = next_initialized_tick_within_one_word(
+            bitmap.get(&-1).copied().unwrap_or_default(),
+            -257,
+            1,
+            false,
+        );
         assert_eq!(result, Some((-200, true)));
     }
 
@@ -95,11 +109,21 @@ mod tests {
         }
 
         let (word, _) = position(78);
-        let result = next_initialized_tick_within_one_word(bitmap.get(&word).copied().unwrap_or_default(), 78, 1, true);
+        let result = next_initialized_tick_within_one_word(
+            bitmap.get(&word).copied().unwrap_or_default(),
+            78,
+            1,
+            true,
+        );
         assert_eq!(result, Some((78, true)));
 
         let (word, _) = position(79);
-        let result = next_initialized_tick_within_one_word(bitmap.get(&word).copied().unwrap_or_default(), 79, 1, true);
+        let result = next_initialized_tick_within_one_word(
+            bitmap.get(&word).copied().unwrap_or_default(),
+            79,
+            1,
+            true,
+        );
         assert_eq!(result, Some((78, true)));
     }
 }

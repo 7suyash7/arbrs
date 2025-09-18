@@ -28,7 +28,7 @@ pub fn get_liquidity_for_amount0(
     if denominator.is_zero() {
         return None;
     }
-    
+
     let liquidity = numerator.checked_div(denominator)?;
 
     if liquidity > U256::from(u128::MAX) {
@@ -48,14 +48,14 @@ pub fn get_liquidity_for_amount1(
     if sqrt_ratio_a_x96 > sqrt_ratio_b_x96 {
         std::mem::swap(&mut sqrt_ratio_a_x96, &mut sqrt_ratio_b_x96);
     }
-    
+
     let numerator = amount1.checked_mul(Q96)?;
     let denominator = sqrt_ratio_b_x96.checked_sub(sqrt_ratio_a_x96)?;
 
     if denominator.is_zero() {
         return None;
     }
-    
+
     let liquidity = numerator.checked_div(denominator)?;
 
     if liquidity > U256::from(u128::MAX) {
