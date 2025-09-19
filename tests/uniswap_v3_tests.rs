@@ -3,14 +3,12 @@ use alloy_primitives::{Address, I256, U160, U256, address, aliases::U24};
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types::TransactionRequest;
 use alloy_sol_types::SolCall;
-use arbrs::pool::uniswap_v3_snapshot::UniswapV3LiquiditySnapshot;
 use arbrs::TokenLike;
 use arbrs::core::token::Token;
 use arbrs::pool::LiquidityPool;
 use arbrs::pool::uniswap_v3::UniswapV3Pool;
-use serde_json::Value;
-use std::fs;
 use arbrs::pool::uniswap_v3::{TickInfo, UniswapV3PoolState};
+use arbrs::pool::uniswap_v3_snapshot::UniswapV3LiquiditySnapshot;
 use arbrs::{
     TokenManager,
     core::token::Erc20Data,
@@ -22,7 +20,9 @@ use arbrs::{
         utils::sqrt,
     },
 };
+use serde_json::Value;
 use std::collections::BTreeMap;
+use std::fs;
 use std::str::FromStr;
 use std::sync::Arc;
 use url::Url;
@@ -82,14 +82,13 @@ async fn setup_v3_pool_manager() -> (
     let provider_arc: Arc<DynProvider> = Arc::new(provider);
     let token_manager = Arc::new(TokenManager::new(provider_arc.clone(), 1));
     let pool_manager = UniswapV3PoolManager::new(
-        token_manager.clone(), 
-        provider_arc, 
+        token_manager.clone(),
+        provider_arc,
         1,
         0,
         V3_FACTORY_ADDRESS,
     );
     (token_manager, pool_manager)
-
 }
 
 fn e18(n: u64) -> U256 {
@@ -518,15 +517,21 @@ async fn test_v3_swap_calculations_match_quoter() {
 #[tokio::test]
 async fn test_v3_simulations() {
     let (_token_manager, pool_manager) = setup_v3_pool_manager().await;
-    let pool_arc = pool_manager.build_pool(
-        WBTC_WETH_V3_POOL_ADDRESS,
-        WBTC_ADDRESS,
-        WETH_ADDRESS,
-        3000,
-        60
-    ).await.unwrap();
+    let pool_arc = pool_manager
+        .build_pool(
+            WBTC_WETH_V3_POOL_ADDRESS,
+            WBTC_ADDRESS,
+            WETH_ADDRESS,
+            3000,
+            60,
+        )
+        .await
+        .unwrap();
 
-    let pool = pool_arc.as_any().downcast_ref::<UniswapV3Pool<DynProvider>>().unwrap();
+    let pool = pool_arc
+        .as_any()
+        .downcast_ref::<UniswapV3Pool<DynProvider>>()
+        .unwrap();
 
     pool.update_state().await.unwrap();
 
@@ -543,7 +548,10 @@ async fn test_v3_simulations() {
     assert_eq!(sim_result.initial_state, initial_state);
 
     assert_eq!(sim_result.amount0_delta, I256::from_raw(amount_in_wbtc));
-    let expected_weth_out = pool.calculate_tokens_out(&wbtc, amount_in_wbtc).await.unwrap();
+    let expected_weth_out = pool
+        .calculate_tokens_out(&wbtc, amount_in_wbtc)
+        .await
+        .unwrap();
     assert_eq!(sim_result.amount1_delta, -I256::from_raw(expected_weth_out));
 
     let override_state = arbrs::pool::uniswap_v3::UniswapV3PoolState {
@@ -567,11 +575,26 @@ async fn test_v3_simulations() {
         ..Default::default()
     };
 
-    assert_eq!(override_sim_result.amount0_delta, -I256::try_from(6157179).unwrap());
-    assert_eq!(override_sim_result.amount1_delta, I256::from_raw(amount_in_weth));
-    assert_eq!(override_sim_result.final_state.sqrt_price_x96, expected_final_state.sqrt_price_x96);
-    assert_eq!(override_sim_result.final_state.tick, expected_final_state.tick);
-    assert_eq!(override_sim_result.final_state.liquidity, expected_final_state.liquidity);
+    assert_eq!(
+        override_sim_result.amount0_delta,
+        -I256::try_from(6157179).unwrap()
+    );
+    assert_eq!(
+        override_sim_result.amount1_delta,
+        I256::from_raw(amount_in_weth)
+    );
+    assert_eq!(
+        override_sim_result.final_state.sqrt_price_x96,
+        expected_final_state.sqrt_price_x96
+    );
+    assert_eq!(
+        override_sim_result.final_state.tick,
+        expected_final_state.tick
+    );
+    assert_eq!(
+        override_sim_result.final_state.liquidity,
+        expected_final_state.liquidity
+    );
 }
 
 #[tokio::test]
@@ -624,8 +647,16 @@ async fn test_pool_manager_applies_snapshot_from_file() {
         tick_data.insert(
             tick.parse::<i32>().unwrap(),
             TickInfo {
-                liquidity_gross: tick_info_data["liquidity_gross"].as_str().unwrap().parse().unwrap(),
-                liquidity_net: tick_info_data["liquidity_net"].as_str().unwrap().parse().unwrap(),
+                liquidity_gross: tick_info_data["liquidity_gross"]
+                    .as_str()
+                    .unwrap()
+                    .parse()
+                    .unwrap(),
+                liquidity_net: tick_info_data["liquidity_net"]
+                    .as_str()
+                    .unwrap()
+                    .parse()
+                    .unwrap(),
             },
         );
     }
@@ -638,8 +669,14 @@ async fn test_pool_manager_applies_snapshot_from_file() {
         (token_manager, provider_arc)
     };
 
-    let token0 = TokenManager::new(provider.clone(), 1).get_token(WBTC_ADDRESS).await.unwrap();
-    let token1 = TokenManager::new(provider.clone(), 1).get_token(WETH_ADDRESS).await.unwrap();
+    let token0 = TokenManager::new(provider.clone(), 1)
+        .get_token(WBTC_ADDRESS)
+        .await
+        .unwrap();
+    let token1 = TokenManager::new(provider.clone(), 1)
+        .get_token(WETH_ADDRESS)
+        .await
+        .unwrap();
 
     let pool = UniswapV3Pool::new(
         Address::from_str(pool_address_str).unwrap(),
@@ -648,7 +685,10 @@ async fn test_pool_manager_applies_snapshot_from_file() {
         3000,
         60,
         provider,
-        Some(arbrs::pool::uniswap_v3_snapshot::LiquidityMap { tick_bitmap: tick_bitmap.clone(), tick_data: tick_data.clone() })
+        Some(arbrs::pool::uniswap_v3_snapshot::LiquidityMap {
+            tick_bitmap: tick_bitmap.clone(),
+            tick_data: tick_data.clone(),
+        }),
     );
 
     let state = pool.state.read().await;
@@ -658,7 +698,6 @@ async fn test_pool_manager_applies_snapshot_from_file() {
 
 #[tokio::test]
 async fn test_v3_pool_discovery() {
-    // 1. Setup provider to connect to your Anvil fork
     let url = Url::parse(FORK_RPC_URL).expect("Failed to parse RPC URL");
     let provider = ProviderBuilder::new().connect_http(url);
     let provider_arc: Arc<DynProvider> = Arc::new(provider);
@@ -675,9 +714,15 @@ async fn test_v3_pool_discovery() {
         V3_FACTORY_ADDRESS,
     );
 
-    let new_pools = pool_manager.discover_pools_in_range(end_block).await.unwrap();
+    let new_pools = pool_manager
+        .discover_pools_in_range(end_block)
+        .await
+        .unwrap();
 
-    assert!(!new_pools.is_empty(), "discover_pools should have found the USDC/WETH 0.01% pool");
+    assert!(
+        !new_pools.is_empty(),
+        "discover_pools should have found the USDC/WETH 0.01% pool"
+    );
 
     let usdc_weth_pool_address = address!("e0554a476A092703abdB3Ef35c80e0D76d32939F");
     let discovered_pool = new_pools

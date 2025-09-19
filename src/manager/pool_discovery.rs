@@ -1,8 +1,8 @@
-use alloy_primitives::Address;
-use alloy_sol_types::{sol, SolEvent};
 use crate::errors::ArbRsError;
+use alloy_primitives::Address;
 use alloy_provider::Provider;
 use alloy_rpc_types::{Filter, Log};
+use alloy_sol_types::{SolEvent, sol};
 use std::sync::Arc;
 
 // ABI definition for the Uniswap V2 Factory's `PairCreated` event
@@ -59,9 +59,7 @@ pub async fn discover_new_v2_pools<P: Provider + Send + Sync + 'static + ?Sized>
     let logs: Vec<Log> = provider
         .get_logs(&event_filter)
         .await
-        .map_err(|e| {
-            ArbRsError::ProviderError(e.to_string())
-        })?;
+        .map_err(|e| ArbRsError::ProviderError(e.to_string()))?;
 
     let mut discovered_pools = Vec::new();
 
@@ -75,7 +73,11 @@ pub async fn discover_new_v2_pools<P: Provider + Send + Sync + 'static + ?Sized>
                 });
             }
             Err(e) => {
-                println!("[discover_new_v2_pools] FAILED to decode log #{}: {:?}", i + 1, e);
+                println!(
+                    "[discover_new_v2_pools] FAILED to decode log #{}: {:?}",
+                    i + 1,
+                    e
+                );
             }
         }
     }
@@ -107,7 +109,7 @@ pub async fn discover_new_v3_pools<P: Provider + Send + Sync + 'static + ?Sized>
         discovered_pools.push(DiscoveredV3Pool {
             token0: decoded_log.token0,
             token1: decoded_log.token1,
-            fee: decoded_log.fee.to(), 
+            fee: decoded_log.fee.to(),
             tick_spacing: decoded_log.tickSpacing.as_i32(),
             pool_address: decoded_log.pool,
         });

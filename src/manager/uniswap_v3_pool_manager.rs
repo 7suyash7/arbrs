@@ -2,9 +2,7 @@ use crate::errors::ArbRsError;
 use crate::manager::pool_discovery::discover_new_v3_pools;
 use crate::manager::token_manager::TokenManager;
 use crate::pool::{
-    LiquidityPool,
-    uniswap_v3::UniswapV3Pool,
-    uniswap_v3_snapshot::UniswapV3LiquiditySnapshot,
+    LiquidityPool, uniswap_v3::UniswapV3Pool, uniswap_v3_snapshot::UniswapV3LiquiditySnapshot,
 };
 use alloy_primitives::Address;
 use alloy_provider::Provider;
@@ -94,7 +92,10 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> UniswapV3PoolManager<P> {
         Ok(pool)
     }
 
-    pub async fn discover_pools_in_range(&mut self, end_block: u64) -> Result<Vec<Arc<dyn LiquidityPool<P>>>, ArbRsError> {
+    pub async fn discover_pools_in_range(
+        &mut self,
+        end_block: u64,
+    ) -> Result<Vec<Arc<dyn LiquidityPool<P>>>, ArbRsError> {
         if end_block <= self.last_discovery_block {
             return Ok(Vec::new());
         }
@@ -104,17 +105,20 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> UniswapV3PoolManager<P> {
             self.factory_address,
             self.last_discovery_block + 1,
             end_block,
-        ).await?;
+        )
+        .await?;
 
         let mut new_pools = Vec::new();
         for pool_data in discovered_pools_data {
-            let pool = self.build_pool(
-                pool_data.pool_address,
-                pool_data.token0,
-                pool_data.token1,
-                pool_data.fee,
-                pool_data.tick_spacing,
-            ).await?;
+            let pool = self
+                .build_pool(
+                    pool_data.pool_address,
+                    pool_data.token0,
+                    pool_data.token1,
+                    pool_data.fee,
+                    pool_data.tick_spacing,
+                )
+                .await?;
             new_pools.push(pool);
         }
 

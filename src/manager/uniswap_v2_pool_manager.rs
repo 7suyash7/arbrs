@@ -1,7 +1,7 @@
 use crate::dex::{DexDetails, DexVariant, build_mainnet_dex_registry};
 use crate::errors::ArbRsError;
-use crate::manager::token_manager::TokenManager;
 use crate::manager::pool_discovery::discover_new_v2_pools;
+use crate::manager::token_manager::TokenManager;
 use crate::pool::LiquidityPool;
 use alloy_primitives::Address;
 use alloy_provider::Provider;
@@ -38,15 +38,27 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> UniswapV2PoolManager<P> {
     }
 
     /// Discovers new pools within a specified block range and adds them to the manager.
-    pub async fn discover_pools_in_range(&mut self, end_block: u64) -> Result<Vec<Arc<dyn LiquidityPool<P>>>, ArbRsError> {
-        println!("[discover_pools_in_range] Current last_discovery_block: {}", self.last_discovery_block);
+    pub async fn discover_pools_in_range(
+        &mut self,
+        end_block: u64,
+    ) -> Result<Vec<Arc<dyn LiquidityPool<P>>>, ArbRsError> {
+        println!(
+            "[discover_pools_in_range] Current last_discovery_block: {}",
+            self.last_discovery_block
+        );
         if end_block <= self.last_discovery_block {
-            println!("[discover_pools_in_range] No new blocks to scan. end_block: {}, last_discovery_block: {}", end_block, self.last_discovery_block);
+            println!(
+                "[discover_pools_in_range] No new blocks to scan. end_block: {}, last_discovery_block: {}",
+                end_block, self.last_discovery_block
+            );
             return Ok(Vec::new());
         }
 
         let from_block = self.last_discovery_block + 1;
-        println!("[discover_pools_in_range] Discovering pools from {} to {}", from_block, end_block);
+        println!(
+            "[discover_pools_in_range] Discovering pools from {} to {}",
+            from_block, end_block
+        );
 
         let discovered_pools_data = discover_new_v2_pools(
             self.provider.clone(),
@@ -56,18 +68,26 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> UniswapV2PoolManager<P> {
         )
         .await?;
 
-        println!("[discover_pools_in_range] Discovered {} new pools.", discovered_pools_data.len());
+        println!(
+            "[discover_pools_in_range] Discovered {} new pools.",
+            discovered_pools_data.len()
+        );
 
         let mut new_pools = Vec::new();
 
         for pool_data in discovered_pools_data {
-             println!("[discover_pools_in_range] Building pool at address: {}", pool_data.pool_address);
-            let pool = self.build_v2_pool(
-                pool_data.pool_address,
-                pool_data.token0,
-                pool_data.token1,
-                DexVariant::UniswapV2,
-            ).await?;
+            println!(
+                "[discover_pools_in_range] Building pool at address: {}",
+                pool_data.pool_address
+            );
+            let pool = self
+                .build_v2_pool(
+                    pool_data.pool_address,
+                    pool_data.token0,
+                    pool_data.token1,
+                    DexVariant::UniswapV2,
+                )
+                .await?;
             new_pools.push(pool);
         }
 
@@ -77,7 +97,11 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> UniswapV2PoolManager<P> {
 
     /// Discovers new pools from the last discovered block up to the latest block.
     pub async fn discover_pools(&mut self) -> Result<Vec<Arc<dyn LiquidityPool<P>>>, ArbRsError> {
-        let latest_block = self.provider.get_block_number().await.map_err(|e| ArbRsError::ProviderError(e.to_string()))?;
+        let latest_block = self
+            .provider
+            .get_block_number()
+            .await
+            .map_err(|e| ArbRsError::ProviderError(e.to_string()))?;
         self.discover_pools_in_range(latest_block).await
     }
 

@@ -439,7 +439,8 @@ async fn test_uniswap_v2_simulation_logic() {
         WBTC_WETH_POOL_ADDRESS,
         WBTC_ADDRESS,
         WETH_ADDRESS,
-    ).await;
+    )
+    .await;
     let weth = manager.get_token(WETH_ADDRESS).await.unwrap();
 
     let state_before = UniswapV2PoolState {
@@ -459,13 +460,11 @@ async fn test_uniswap_v2_simulation_logic() {
     let expected_final_reserve1 = U256::from_str("34131893250000000000000").unwrap();
 
     assert_eq!(
-        sim_result.final_state.reserve0, 
-        expected_final_reserve0, 
+        sim_result.final_state.reserve0, expected_final_reserve0,
         "Simulated reserve0 does not match verified on-chain reserve0"
     );
     assert_eq!(
-        sim_result.final_state.reserve1, 
-        expected_final_reserve1, 
+        sim_result.final_state.reserve1, expected_final_reserve1,
         "Simulated reserve1 does not match verified on-chain reserve1"
     );
 }
@@ -487,14 +486,29 @@ async fn test_v2_pool_discovery() {
         start_block,
     );
 
-    let new_pools = pool_manager.discover_pools_in_range(end_block).await.unwrap();
+    let new_pools = pool_manager
+        .discover_pools_in_range(end_block)
+        .await
+        .unwrap();
 
-    assert!(!new_pools.is_empty(), "discover_pools should have found at least one new pool in the historical range");
+    assert!(
+        !new_pools.is_empty(),
+        "discover_pools should have found at least one new pool in the historical range"
+    );
 
     let aurn_weth_pool_address = address!("dc0f2bd504d334f81e81a9949403e6cd6b954762");
-    let pool_was_found = new_pools.iter().any(|p| p.address() == aurn_weth_pool_address);
+    let pool_was_found = new_pools
+        .iter()
+        .any(|p| p.address() == aurn_weth_pool_address);
 
-    assert!(pool_was_found, "The AURN/WETH pool should have been discovered");
+    assert!(
+        pool_was_found,
+        "The AURN/WETH pool should have been discovered"
+    );
 
-    assert!(pool_manager.get_pool_by_address(aurn_weth_pool_address).is_some());
+    assert!(
+        pool_manager
+            .get_pool_by_address(aurn_weth_pool_address)
+            .is_some()
+    );
 }
