@@ -95,6 +95,7 @@ impl<P: Provider + Send + Sync + ?Sized + 'static, S: V2CalculationStrategy> Uni
     pub fn calculate_tokens_out_with_override(
         &self,
         token_in: &Token<P>,
+        _token_out: &Token<P>,
         amount_in: U256,
         override_state: &UniswapV2PoolState,
     ) -> Result<U256, ArbRsError> {
@@ -111,6 +112,7 @@ impl<P: Provider + Send + Sync + ?Sized + 'static, S: V2CalculationStrategy> Uni
     /// Calculates swap input using a provided state object, bypassing the internal cached state.
     pub fn calculate_tokens_in_from_tokens_out_with_override(
         &self,
+        _token_in: &Token<P>,
         token_out: &Token<P>,
         amount_out: U256,
         override_state: &UniswapV2PoolState,
@@ -151,6 +153,24 @@ impl<P: Provider + Send + Sync + ?Sized + 'static, S: V2CalculationStrategy> Uni
                 "Output token {} is not part of this pool",
                 token_out.address()
             )))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn validate_token_pair(
+        &self,
+        token_a: &Token<P>,
+        token_b: &Token<P>,
+    ) -> Result<(), ArbRsError> {
+        if !((token_a.address() == self.token0.address()
+            && token_b.address() == self.token1.address())
+            || (token_a.address() == self.token1.address()
+                && token_b.address() == self.token0.address()))
+        {
+            Err(ArbRsError::CalculationError(
+                "Token pair does not match pool".into(),
+            ))
         } else {
             Ok(())
         }
@@ -338,10 +358,11 @@ impl<P: Provider + Send + Sync + ?Sized + 'static, S: V2CalculationStrategy> Uni
     pub async fn simulate_exact_input_swap(
         &self,
         token_in: &Token<P>,
+        token_out: &Token<P>,
         token_in_quantity: U256,
         override_state: Option<&UniswapV2PoolState>,
     ) -> Result<UniswapV2PoolSimulationResult, ArbRsError> {
-        self.validate_token_in(token_in)?;
+        self.validate_token_pair(token_in, token_out)?;
         let state_guard = self.state.read().await;
         let initial_state = override_state.unwrap_or(&state_guard);
 
@@ -350,8 +371,12 @@ impl<P: Provider + Send + Sync + ?Sized + 'static, S: V2CalculationStrategy> Uni
             initial_state.reserve0, initial_state.reserve1
         );
 
-        let token_out_quantity =
-            self.calculate_tokens_out_with_override(token_in, token_in_quantity, initial_state)?;
+        let token_out_quantity = self.calculate_tokens_out_with_override(
+            token_in,
+            token_out,
+            token_in_quantity,
+            initial_state,
+        )?;
 
         let (final_reserve0, final_reserve1, amount0_delta, amount1_delta) =
             if token_in.address() == self.token0.address() {
@@ -396,15 +421,17 @@ impl<P: Provider + Send + Sync + ?Sized + 'static, S: V2CalculationStrategy> Uni
 
     pub async fn simulate_exact_output_swap(
         &self,
+        token_in: &Token<P>,
         token_out: &Token<P>,
         token_out_quantity: U256,
         override_state: Option<&UniswapV2PoolState>,
     ) -> Result<UniswapV2PoolSimulationResult, ArbRsError> {
-        self.validate_token_out(token_out)?;
+        self.validate_token_pair(token_in, token_out)?;
         let state_guard = self.state.read().await;
         let initial_state = override_state.unwrap_or(&state_guard);
 
         let token_in_quantity = self.calculate_tokens_in_from_tokens_out_with_override(
+            token_in,
             token_out,
             token_out_quantity,
             initial_state,
@@ -498,8 +525,8 @@ impl<P: Provider + Send + Sync + ?Sized + 'static, S: V2CalculationStrategy + 's
         self.address
     }
 
-    fn tokens(&self) -> (Arc<Token<P>>, Arc<Token<P>>) {
-        (self.token0.clone(), self.token1.clone())
+    fn get_all_tokens(&self) -> Vec<Arc<Token<P>>> {
+        vec![self.token0.clone(), self.token1.clone()]
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -570,9 +597,10 @@ impl<P: Provider + Send + Sync + ?Sized + 'static, S: V2CalculationStrategy + 's
     async fn calculate_tokens_out(
         &self,
         token_in: &Token<P>,
+        token_out: &Token<P>,
         amount_in: U256,
     ) -> Result<U256, ArbRsError> {
-        self.validate_token_in(token_in)?;
+        self.validate_token_pair(token_in, token_out)?;
         let current_state = self.state.read().await;
         let (reserve_in, reserve_out) = if token_in.address() == self.token0.address() {
             (current_state.reserve0, current_state.reserve1)
@@ -585,10 +613,11 @@ impl<P: Provider + Send + Sync + ?Sized + 'static, S: V2CalculationStrategy + 's
 
     async fn calculate_tokens_in_from_tokens_out(
         &self,
+        token_in: &Token<P>,
         token_out: &Token<P>,
         amount_out: U256,
     ) -> Result<U256, ArbRsError> {
-        self.validate_token_out(token_out)?;
+        self.validate_token_pair(token_in, token_out)?;
         let current_state = self.state.read().await;
         let (reserve_in, reserve_out) = if token_out.address() == self.token1.address() {
             (current_state.reserve0, current_state.reserve1)
@@ -599,40 +628,50 @@ impl<P: Provider + Send + Sync + ?Sized + 'static, S: V2CalculationStrategy + 's
             .calculate_tokens_in_from_tokens_out(reserve_in, reserve_out, amount_out)
     }
 
-    async fn absolute_price(&self) -> Result<f64, ArbRsError> {
+    async fn absolute_price(
+        &self,
+        token_in: &Token<P>,
+        token_out: &Token<P>,
+    ) -> Result<f64, ArbRsError> {
+        self.validate_token_pair(token_in, token_out)?;
         let current_state = self.state.read().await;
-        if current_state.reserve0 == U256::ZERO {
+        let (reserve_in, reserve_out) = if token_in.address() == self.token0.address() {
+            (current_state.reserve0, current_state.reserve1)
+        } else {
+            (current_state.reserve1, current_state.reserve0)
+        };
+
+        if reserve_in == U256::ZERO {
             return Err(ArbRsError::CalculationError(
-                "Cannot calculate price: reserve0 is zero".to_string(),
+                "Cannot calculate price: input reserve is zero".into(),
             ));
         }
-        let reserve0_f64 = current_state
-            .reserve0
-            .to_string()
-            .parse::<f64>()
-            .unwrap_or(0.0);
-        let reserve1_f64 = current_state
-            .reserve1
-            .to_string()
-            .parse::<f64>()
-            .unwrap_or(0.0);
-        if reserve0_f64 == 0.0 {
+        let reserve_in_f64 = reserve_in.to_string().parse::<f64>().unwrap_or(0.0);
+        let reserve_out_f64 = reserve_out.to_string().parse::<f64>().unwrap_or(0.0);
+        if reserve_in_f64 == 0.0 {
             return Err(ArbRsError::CalculationError(
-                "Cannot calculate price: reserve0 conversion failed or is zero".to_string(),
+                "Cannot calculate price: reserve conversion failed or is zero".into(),
             ));
         }
-        Ok(reserve1_f64 / reserve0_f64)
+        Ok(reserve_out_f64 / reserve_in_f64)
     }
 
-    async fn nominal_price(&self) -> Result<f64, ArbRsError> {
-        let absolute_price = self.absolute_price().await?;
-        let scaling_factor =
-            10_f64.powi(self.token0.decimals() as i32 - self.token1.decimals() as i32);
+    async fn nominal_price(
+        &self,
+        token_in: &Token<P>,
+        token_out: &Token<P>,
+    ) -> Result<f64, ArbRsError> {
+        let absolute_price = self.absolute_price(token_in, token_out).await?;
+        let scaling_factor = 10_f64.powi(token_in.decimals() as i32 - token_out.decimals() as i32);
         Ok(absolute_price * scaling_factor)
     }
 
-    async fn absolute_exchange_rate(&self) -> Result<f64, ArbRsError> {
-        let price = self.absolute_price().await?;
+    async fn absolute_exchange_rate(
+        &self,
+        token_in: &Token<P>,
+        token_out: &Token<P>,
+    ) -> Result<f64, ArbRsError> {
+        let price = self.absolute_price(token_in, token_out).await?;
         if price == 0.0 {
             Ok(f64::INFINITY)
         } else {
@@ -674,8 +713,8 @@ impl<P: Provider + Send + Sync + ?Sized + 'static> LiquidityPool<P>
         self.address
     }
 
-    fn tokens(&self) -> (Arc<Token<P>>, Arc<Token<P>>) {
-        (self.token0.clone(), self.token1.clone())
+    fn get_all_tokens(&self) -> Vec<Arc<Token<P>>> {
+        vec![self.token0.clone(), self.token1.clone()]
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -683,45 +722,58 @@ impl<P: Provider + Send + Sync + ?Sized + 'static> LiquidityPool<P>
     }
 
     async fn update_state(&self) -> Result<(), ArbRsError> {
-        // Unregistered pools do not fetch state
         Ok(())
     }
 
     async fn calculate_tokens_out(
         &self,
         _token_in: &Token<P>,
+        _token_out: &Token<P>,
         _amount_in: U256,
     ) -> Result<U256, ArbRsError> {
         Err(ArbRsError::CalculationError(
-            "Cannot calculate output for unregistered pool".to_string(),
+            "Cannot calculate output for unregistered pool".into(),
         ))
     }
 
     async fn calculate_tokens_in_from_tokens_out(
         &self,
+        _token_in: &Token<P>,
         _token_out: &Token<P>,
         _amount_out: U256,
     ) -> Result<U256, ArbRsError> {
         Err(ArbRsError::CalculationError(
-            "Cannot calculate input for unregistered pool".to_string(),
+            "Cannot calculate input for unregistered pool".into(),
         ))
     }
 
-    async fn nominal_price(&self) -> Result<f64, ArbRsError> {
+    async fn nominal_price(
+        &self,
+        _token_in: &Token<P>,
+        _token_out: &Token<P>,
+    ) -> Result<f64, ArbRsError> {
         Err(ArbRsError::CalculationError(
-            "Cannot get price for unregistered pool".to_string(),
+            "Cannot get price for unregistered pool".into(),
         ))
     }
 
-    async fn absolute_price(&self) -> Result<f64, ArbRsError> {
+    async fn absolute_price(
+        &self,
+        _token_in: &Token<P>,
+        _token_out: &Token<P>,
+    ) -> Result<f64, ArbRsError> {
         Err(ArbRsError::CalculationError(
-            "Cannot get price for unregistered pool".to_string(),
+            "Cannot get price for unregistered pool".into(),
         ))
     }
 
-    async fn absolute_exchange_rate(&self) -> Result<f64, ArbRsError> {
+    async fn absolute_exchange_rate(
+        &self,
+        _token_in: &Token<P>,
+        _token_out: &Token<P>,
+    ) -> Result<f64, ArbRsError> {
         Err(ArbRsError::CalculationError(
-            "Cannot get exchange rate for unregistered pool".to_string(),
+            "Cannot get exchange rate for unregistered pool".into(),
         ))
     }
 }

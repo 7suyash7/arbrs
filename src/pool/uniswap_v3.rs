@@ -32,7 +32,6 @@ sol! {
 pub struct TickInfo {
     pub liquidity_gross: u128,
     pub liquidity_net: i128,
-    // other fields can be added later if needed for fee calculations, etc.
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -109,6 +108,24 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> UniswapV3Pool<P> {
             state_cache: RwLock::new(BTreeMap::new()),
             _min_word: min_word,
             _max_word: max_word,
+        }
+    }
+
+    fn validate_token_pair(
+        &self,
+        token_a: &Token<P>,
+        token_b: &Token<P>,
+    ) -> Result<(), ArbRsError> {
+        if !((token_a.address() == self.token0.address()
+            && token_b.address() == self.token1.address())
+            || (token_a.address() == self.token1.address()
+                && token_b.address() == self.token0.address()))
+        {
+            Err(ArbRsError::CalculationError(
+                "Token pair does not match pool".into(),
+            ))
+        } else {
+            Ok(())
         }
     }
 
@@ -438,9 +455,11 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> UniswapV3Pool<P> {
     pub async fn simulate_exact_input_swap(
         &self,
         token_in: &Token<P>,
+        token_out: &Token<P>,
         amount_in: U256,
         override_state: Option<&UniswapV3PoolState>,
     ) -> Result<UniswapV3PoolSimulationResult, ArbRsError> {
+        self.validate_token_pair(token_in, token_out)?;
         let zero_for_one = token_in.address() == self.token0.address();
         let amount_specified = I256::from_raw(amount_in);
 
@@ -472,12 +491,14 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> UniswapV3Pool<P> {
 
     pub async fn simulate_exact_output_swap(
         &self,
+        token_in: &Token<P>,
         token_out: &Token<P>,
         amount_out: U256,
         override_state: Option<&UniswapV3PoolState>,
     ) -> Result<UniswapV3PoolSimulationResult, ArbRsError> {
+        self.validate_token_pair(token_in, token_out)?;
         let zero_for_one = token_out.address() == self.token1.address();
-        let amount_specified = I256::from_raw(amount_out);
+        let amount_specified = -I256::from_raw(amount_out);
 
         let sqrt_price_limit_x96 = if zero_for_one {
             MIN_SQRT_RATIO + U256::from(1)
@@ -520,8 +541,8 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> LiquidityPool<P> for UniswapV
         self.address
     }
 
-    fn tokens(&self) -> (Arc<Token<P>>, Arc<Token<P>>) {
-        (self.token0.clone(), self.token1.clone())
+    fn get_all_tokens(&self) -> Vec<Arc<Token<P>>> {
+        vec![self.token0.clone(), self.token1.clone()]
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -548,23 +569,25 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> LiquidityPool<P> for UniswapV
             return Ok(());
         }
 
-        let new_state = self._fetch_state_at_block(latest_block).await?;
+        let fetched_state = self._fetch_state_at_block(latest_block).await?;
 
         let state_updated = {
             let state = self.state.read().await;
-            state.sqrt_price_x96 != new_state.sqrt_price_x96
-                || state.liquidity != new_state.liquidity
+            state.sqrt_price_x96 != fetched_state.sqrt_price_x96
+                || state.liquidity != fetched_state.liquidity
         };
 
         if state_updated {
             let mut state_writer = self.state.write().await;
-            *state_writer = new_state.clone();
+            // preserve the tick_bitmap and tick_data
+            let old_tick_bitmap = state_writer.tick_bitmap.clone();
+            let old_tick_data = state_writer.tick_data.clone();
+            *state_writer = fetched_state.clone();
+            state_writer.tick_bitmap = old_tick_bitmap;
+            state_writer.tick_data = old_tick_data;
 
             let mut cache = self.state_cache.write().await;
-            cache.insert(latest_block, new_state.clone());
-
-            // pub sub logic here later
-            // self.notify_subscribers(PublisherMessage::PoolStateUpdate(new_state)).await;
+            cache.insert(latest_block, fetched_state.clone());
         }
 
         Ok(())
@@ -573,8 +596,10 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> LiquidityPool<P> for UniswapV
     async fn calculate_tokens_out(
         &self,
         token_in: &Token<P>,
+        token_out: &Token<P>,
         amount_in: U256,
     ) -> Result<U256, ArbRsError> {
+        self.validate_token_pair(token_in, token_out)?;
         let zero_for_one = token_in.address() == self.token0.address();
         let amount_specified = I256::from_raw(amount_in);
 
@@ -597,11 +622,13 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> LiquidityPool<P> for UniswapV
 
     async fn calculate_tokens_in_from_tokens_out(
         &self,
+        token_in: &Token<P>,
         token_out: &Token<P>,
         amount_out: U256,
     ) -> Result<U256, ArbRsError> {
+        self.validate_token_pair(token_in, token_out)?;
         let zero_for_one = token_out.address() == self.token1.address();
-        let amount_specified = I256::from_raw(amount_out);
+        let amount_specified = -I256::from_raw(amount_out);
 
         let sqrt_price_limit_x96 = if zero_for_one {
             MIN_SQRT_RATIO + U256::from(1)
@@ -620,14 +647,22 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> LiquidityPool<P> for UniswapV
         })
     }
 
-    async fn nominal_price(&self) -> Result<f64, ArbRsError> {
-        let absolute_price = self.absolute_price().await?;
-        let scaling_factor =
-            10_f64.powi(self.token0.decimals() as i32 - self.token1.decimals() as i32);
+    async fn nominal_price(
+        &self,
+        token_in: &Token<P>,
+        token_out: &Token<P>,
+    ) -> Result<f64, ArbRsError> {
+        let absolute_price = self.absolute_price(token_in, token_out).await?;
+        let scaling_factor = 10_f64.powi(token_in.decimals() as i32 - token_out.decimals() as i32);
         Ok(absolute_price * scaling_factor)
     }
 
-    async fn absolute_price(&self) -> Result<f64, ArbRsError> {
+    async fn absolute_price(
+        &self,
+        token_in: &Token<P>,
+        token_out: &Token<P>,
+    ) -> Result<f64, ArbRsError> {
+        self.validate_token_pair(token_in, token_out)?;
         let state = self.state.read().await;
         if state.sqrt_price_x96.is_zero() {
             return Ok(0.0);
@@ -650,16 +685,22 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> LiquidityPool<P> for UniswapV
         }
 
         let ratio = sqrt_price_x96_f64 / q96_f64;
-        Ok(ratio.powi(2))
+        let price_of_token0_in_token1 = ratio.powi(2);
+
+        if token_in.address() == self.token0.address() {
+            Ok(price_of_token0_in_token1)
+        } else {
+            Ok(1.0 / price_of_token0_in_token1)
+        }
     }
 
-    async fn absolute_exchange_rate(&self) -> Result<f64, ArbRsError> {
-        let price = self.absolute_price().await?;
-        if price == 0.0 {
-            Ok(f64::INFINITY)
-        } else {
-            Ok(1.0 / price)
-        }
+    async fn absolute_exchange_rate(
+        &self,
+        token_in: &Token<P>,
+        token_out: &Token<P>,
+    ) -> Result<f64, ArbRsError> {
+        let price = self.absolute_price(token_out, token_in).await?;
+        Ok(price)
     }
 }
 

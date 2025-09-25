@@ -1,15 +1,142 @@
+use crate::curve::pool_overrides::{DVariant, YVariant};
+use crate::curve::constants::{A_PRECISION, FEE_DENOMINATOR, PRECISION};
 use crate::errors::ArbRsError;
-use alloy_primitives::{U256, U512};
+use alloy_primitives::U256;
 
-// Constants
-const A_PRECISION: U256 = U256::from_limbs([100, 0, 0, 0]);
-const PRECISION: U256 = U256::from_limbs([1000000000000000000, 0, 0, 0]);
-const FEE_DENOMINATOR: U256 = U256::from_limbs([10_000_000_000u64, 0, 0, 0]);
+/// Calculates the "virtual balances" (`xp`) used in the core invariant math.
+/// This normalizes token balances to a common 18-decimal precision, applying rates where necessary.
+/// # Formula
+/// `xp_i = (balance_i * rate_i) / 10^18`
+pub fn xp(rates: &[U256], balances: &[U256]) -> Result<Vec<U256>, ArbRsError> {
+    if rates.len() != balances.len() {
+        return Err(ArbRsError::CalculationError(
+            "Rates and balances vectors must have the same length".to_string(),
+        ));
+    }
 
+    let mut xp_balances = Vec::with_capacity(balances.len());
 
-/// Solves for the Curve stableswap invariant `D` using Newton's method.
-pub fn get_d(xp: &[U256], amp: U256) -> Result<U256, ArbRsError> {
-    let n_coins = U256::from(xp.len());
+    for (rate, balance) in rates.iter().zip(balances.iter()) {
+        // Perform the calculation with checked arithmetic to prevent overflow.
+        let virtual_balance = rate
+            .checked_mul(*balance)
+            .ok_or_else(|| ArbRsError::CalculationError("xp mul overflow".to_string()))?
+            .checked_div(PRECISION)
+            .ok_or_else(|| ArbRsError::CalculationError("xp div by PRECISION failed".to_string()))?;
+        
+        xp_balances.push(virtual_balance);
+    }
+
+    Ok(xp_balances)
+}
+
+pub(super) fn calc_dp_default(d: U256, xp: &[U256], n_coins: U256) -> Result<U256, ArbRsError> {
+    let mut d_p = d;
+    for &x in xp {
+        if x.is_zero() { return Err(ArbRsError::CalculationError("Cannot calculate with zero balance".to_string())); }
+        let denominator = x.checked_mul(n_coins).ok_or(ArbRsError::CalculationError("dp denominator overflow".to_string()))?;
+        d_p = d_p.checked_mul(d).ok_or(ArbRsError::CalculationError("dp mul overflow".to_string()))?
+            .checked_div(denominator).ok_or(ArbRsError::CalculationError("dp div underflow".to_string()))?;
+    }
+    Ok(d_p)
+}
+
+pub(super) fn calc_dp_alpha(d: U256, xp: &[U256], n_coins: U256) -> Result<U256, ArbRsError> {
+    let mut d_p = d;
+    for &x in xp {
+        if x.is_zero() { return Err(ArbRsError::CalculationError("Cannot calculate with zero balance".to_string())); }
+        let denominator = x.checked_mul(n_coins).ok_or(ArbRsError::CalculationError("dp_alpha denominator overflow".to_string()))? + U256::from(1);
+        d_p = d_p.checked_mul(d).ok_or(ArbRsError::CalculationError("dp_alpha mul overflow".to_string()))?
+            .checked_div(denominator).ok_or(ArbRsError::CalculationError("dp_alpha div underflow".to_string()))?;
+    }
+    Ok(d_p)
+}
+
+pub(super) fn calc_dp_beta(d: U256, xp: &[U256], n_coins: U256) -> Result<U256, ArbRsError> {
+    if xp.len() < 2 || xp[0].is_zero() || xp[1].is_zero() { return Err(ArbRsError::CalculationError("dp_beta invalid xp".to_string())); }
+    let n_coins_sq = n_coins.checked_pow(U256::from(2)).ok_or(ArbRsError::CalculationError("n_coins^2 overflow".to_string()))?;
+    d.checked_mul(d).ok_or(ArbRsError::CalculationError("dp_beta mul1 overflow".to_string()))?
+        .checked_div(xp[0]).ok_or(ArbRsError::CalculationError("dp_beta div1 underflow".to_string()))?
+        .checked_mul(d).ok_or(ArbRsError::CalculationError("dp_beta mul2 overflow".to_string()))?
+        .checked_div(xp[1]).ok_or(ArbRsError::CalculationError("dp_beta div2 underflow".to_string()))?
+        .checked_div(n_coins_sq).ok_or(ArbRsError::CalculationError("dp_beta div3 underflow".to_string()))
+}
+
+pub(super) fn calc_dp_gamma(d: U256, xp: &[U256], n_coins: U256) -> Result<U256, ArbRsError> {
+    if xp.len() < 2 || xp[0].is_zero() || xp[1].is_zero() { return Err(ArbRsError::CalculationError("dp_gamma invalid xp".to_string())); }
+    let n_coins_pow_n = n_coins.checked_pow(n_coins).ok_or(ArbRsError::CalculationError("n_coins^n_coins overflow".to_string()))?;
+    d.checked_mul(d).ok_or(ArbRsError::CalculationError("dp_gamma mul1 overflow".to_string()))?
+        .checked_div(xp[0]).ok_or(ArbRsError::CalculationError("dp_gamma div1 underflow".to_string()))?
+        .checked_mul(d).ok_or(ArbRsError::CalculationError("dp_gamma mul2 overflow".to_string()))?
+        .checked_div(xp[1]).ok_or(ArbRsError::CalculationError("dp_gamma div2 underflow".to_string()))?
+        .checked_div(n_coins_pow_n).ok_or(ArbRsError::CalculationError("dp_gamma div3 underflow".to_string()))
+}
+
+pub(super) fn calc_d_default(ann: U256, s: U256, d: U256, d_p: U256, n_coins: U256) -> Result<U256, ArbRsError> {
+    let num_term1 = ann.checked_mul(s).ok_or(ArbRsError::CalculationError("d_default num1 overflow".to_string()))?
+        .checked_div(A_PRECISION).ok_or(ArbRsError::CalculationError("d_default num1 div underflow".to_string()))?;
+    let numerator = (num_term1 + d_p.checked_mul(n_coins).ok_or(ArbRsError::CalculationError("d_default num2 overflow".to_string()))?)
+        .checked_mul(d).ok_or(ArbRsError::CalculationError("d_default numerator overflow".to_string()))?;
+    
+    let den_term1 = ann.saturating_sub(A_PRECISION).checked_mul(d).ok_or(ArbRsError::CalculationError("d_default den1 overflow".to_string()))?
+        .checked_div(A_PRECISION).ok_or(ArbRsError::CalculationError("d_default den1 div underflow".to_string()))?;
+    let denominator = den_term1 + (n_coins + U256::from(1)).checked_mul(d_p).ok_or(ArbRsError::CalculationError("d_default den2 overflow".to_string()))?;
+
+    numerator.checked_div(denominator).ok_or(ArbRsError::CalculationError("d_default final div underflow".to_string()))
+}
+
+pub(super) fn calc_d_alpha(ann: U256, s: U256, d: U256, d_p: U256, n_coins: U256) -> Result<U256, ArbRsError> {
+    let numerator = (ann.checked_mul(s).ok_or(ArbRsError::CalculationError("d_alpha num1 overflow".to_string()))? + d_p.checked_mul(n_coins).ok_or(ArbRsError::CalculationError("d_alpha num2 overflow".to_string()))?)
+        .checked_mul(d).ok_or(ArbRsError::CalculationError("d_alpha numerator overflow".to_string()))?;
+
+    let den_term1 = (ann - U256::from(1)).checked_mul(d).ok_or(ArbRsError::CalculationError("d_alpha den1 overflow".to_string()))?;
+    let denominator = den_term1 + (n_coins + U256::from(1)).checked_mul(d_p).ok_or(ArbRsError::CalculationError("d_alpha den2 overflow".to_string()))?;
+
+    numerator.checked_div(denominator).ok_or(ArbRsError::CalculationError("d_alpha final div underflow".to_string()))
+}
+
+/// The core iterative loop for solving the quadratic equation to find `y`.
+/// This private helper is used by both `get_y` and `get_y_d`.
+///
+/// # Formula
+/// `y = (y^2 + c) / (2y + b - d)`
+fn _get_y_loop(c: U256, b: U256, d: U256) -> Result<U256, ArbRsError> {
+    let mut y = d;
+    for _ in 0..255 {
+        let y_prev = y;
+        let numerator = y.pow(U256::from(2)) + c;
+        let denominator = (y.checked_mul(U256::from(2))
+            .ok_or(ArbRsError::CalculationError("y*2 overflow".to_string()))? + b)
+            .saturating_sub(d);
+        
+        if denominator.is_zero() {
+            return Err(ArbRsError::CalculationError("y denominator is zero".to_string()));
+        }
+        y = numerator / denominator;
+
+        if y > y_prev {
+            if y - y_prev <= U256::from(1) {
+                return Ok(y);
+            }
+        } else if y_prev - y <= U256::from(1) {
+            return Ok(y);
+        }
+    }
+    Err(ArbRsError::CalculationError("y calculation did not converge".to_string()))
+}
+
+/// Solves for the Curve invariant D using Newton's method.
+///
+/// This function acts as a dispatcher, selecting the correct mathematical variants
+/// for the `d` and `d_p` calculations based on the `d_variant` enum, which is
+/// determined at pool initialization.
+pub fn get_d(
+    xp: &[U256],
+    amp: U256,
+    n_coins_usize: usize,
+    d_variant: DVariant,
+) -> Result<U256, ArbRsError> {
+    let n_coins = U256::from(n_coins_usize);
     let s: U256 = xp.iter().sum();
 
     if s.is_zero() {
@@ -17,67 +144,23 @@ pub fn get_d(xp: &[U256], amp: U256) -> Result<U256, ArbRsError> {
     }
 
     let mut d = s;
-    
-    // let ann = amp.checked_mul(n_coins).ok_or(ArbRsError::CalculationError("ANN overflow".to_string()))?;
-    // NEW
-    let amp_scaled = amp.checked_mul(A_PRECISION).ok_or(ArbRsError::CalculationError("amp scale overflow".to_string()))?;
-    let ann = amp_scaled.checked_mul(n_coins).ok_or(ArbRsError::CalculationError("ANN overflow".to_string()))?;
-    
-    println!("\n--- Calculating D ---");
-    println!("Initial D (sum of xp): {}", d);
-    println!("Amp: {}, n_coins: {}", amp, n_coins);
-    println!("ANN (A*n): {}", ann);
-    println!("Balances (xp): {:?}", xp);
-    println!("---------------------\n");
+    let ann = amp.checked_mul(n_coins)
+        .ok_or_else(|| ArbRsError::CalculationError("ann mul overflow".to_string()))?;
 
-    for i in 0..255 {
-        let mut d_p = d;
-        println!("\n--- D Iteration {} ---", i);
-        println!("D at start of loop: {}", d);
-
-        for (_coin_index, &x) in xp.iter().enumerate() {
-            let denominator = x.checked_mul(n_coins).ok_or(ArbRsError::CalculationError("Denominator overflow".to_string()))?;
-            if denominator.is_zero() {
-                continue;
-            }
-            let d_p_512 = d_p.widening_mul(d)
-                .checked_div(U512::from(denominator))
-                .ok_or(ArbRsError::CalculationError("d_p 512 division failed".to_string()))?;
-            
-            let limbs = d_p_512.into_limbs();
-            if limbs[4..].iter().any(|&limb| limb != 0) {
-                return Err(ArbRsError::CalculationError("d_p overflow after division".to_string()));
-            }
-            d_p = U256::from_limbs([limbs[0], limbs[1], limbs[2], limbs[3]]);
-        }
-
+    for _ in 0..255 {
         let d_prev = d;
 
-        let numerator_left = ann.checked_mul(s).ok_or(ArbRsError::CalculationError("Numerator-left overflow".to_string()))?;
-        let numerator_right = d_p.checked_mul(n_coins).ok_or(ArbRsError::CalculationError("Numerator-right overflow".to_string()))?;
-        let numerator_512 = U512::from(numerator_left)
-            .checked_add(U512::from(numerator_right))
-            .ok_or(ArbRsError::CalculationError("Numerator 512 add overflow".to_string()))?
-            .checked_mul(U512::from(d))
-            .ok_or(ArbRsError::CalculationError("Numerator 512 mul overflow".to_string()))?;
+        let d_p = match d_variant {
+            DVariant::Group1 | DVariant::Group3 => calc_dp_alpha(d, xp, n_coins)?,
+            DVariant::Group2 => calc_dp_beta(d, xp, n_coins)?,
+            DVariant::Group4 => calc_dp_gamma(d, xp, n_coins)?,
+            _ => calc_dp_default(d, xp, n_coins)?,
+        };
 
-        let denominator_left = ann.checked_sub(U256::from(1)).ok_or(ArbRsError::CalculationError("ANN underflow".to_string()))?
-                               .checked_mul(d).ok_or(ArbRsError::CalculationError("Denominator-left overflow".to_string()))?;
-        let denominator_right = n_coins.checked_add(U256::from(1)).ok_or(ArbRsError::CalculationError("n_coins+1 overflow".to_string()))?
-                                .checked_mul(d_p).ok_or(ArbRsError::CalculationError("Denominator-right overflow".to_string()))?;
-        let denominator = denominator_left.checked_add(denominator_right).ok_or(ArbRsError::CalculationError("Denominator overflow".to_string()))?;
-
-        if denominator.is_zero() {
-            return Err(ArbRsError::CalculationError("Division by zero in D update".to_string()));
-        }
-
-        let d_512 = numerator_512.checked_div(U512::from(denominator))
-            .ok_or(ArbRsError::CalculationError("D update 512 division failed".to_string()))?;
-        let d_limbs = d_512.into_limbs();
-        if d_limbs[4..].iter().any(|&limb| limb != 0) {
-            return Err(ArbRsError::CalculationError("D overflow after division".to_string()));
-        }
-        d = U256::from_limbs([d_limbs[0], d_limbs[1], d_limbs[2], d_limbs[3]]);
+        d = match d_variant {
+            DVariant::Group0 | DVariant::Group1 => calc_d_alpha(ann, s, d, d_p, n_coins)?,
+            _ => calc_d_default(ann, s, d, d_p, n_coins)?,
+        };
 
         if d > d_prev {
             if d - d_prev <= U256::from(1) {
@@ -91,196 +174,163 @@ pub fn get_d(xp: &[U256], amp: U256) -> Result<U256, ArbRsError> {
     Err(ArbRsError::CalculationError("D calculation did not converge".to_string()))
 }
 
-/// Calculates the balance of a coin `j` given the balances of all other coins.
-pub fn get_y(i: usize, j: usize, x: U256, xp: &[U256], amp: U256) -> Result<U256, ArbRsError> {
-    let n_coins = U256::from(xp.len());
-    // let d = get_d(xp, amp)?;
-    let d = get_d(&xp.iter().map(|&v| v).collect::<Vec<_>>(), amp)?;
-
-
-    println!("\n--- Calculating Y ---");
-    println!("Input token index (i): {}", i);
-    println!("Output token index (j): {}", j);
-    println!("New input balance (x): {}", x);
-    println!("Invariant D: {}", d);
-
-
-    let mut c = d;
-    let mut s = U256::ZERO;
-
-    // let ann = amp.checked_mul(n_coins).ok_or(ArbRsError::CalculationError("ANN overflow in get_y".to_string()))?;
-    let amp_scaled = amp.checked_mul(A_PRECISION).ok_or(ArbRsError::CalculationError("amp scale overflow in get_y".to_string()))?;
-    let ann_for_c = amp_scaled.checked_mul(n_coins).and_then(|res| res.checked_mul(n_coins))
-        .ok_or(ArbRsError::CalculationError("ANN (A*n^2) overflow in get_y".to_string()))?;
-
-    for k in 0..xp.len() {
-        let current_x = if k == i {
-            x
-        } else if k != j {
-            xp[k]
-        } else {
-            continue;
-        };
-        s = s.checked_add(current_x).ok_or(ArbRsError::CalculationError("Sum overflow in get_y".to_string()))?;
-        let denominator = current_x.checked_mul(n_coins).ok_or(ArbRsError::CalculationError("Denominator overflow in get_y".to_string()))?;
-        if denominator.is_zero() {
-            continue;
-        }
-        
-        let c_512 = c.widening_mul(d)
-            .checked_div(U512::from(denominator))
-            .ok_or(ArbRsError::CalculationError("c div failed".to_string()))?;
-
-        let limbs = c_512.into_limbs();
-        if limbs[4..].iter().any(|&limb| limb != 0) {
-            return Err(ArbRsError::CalculationError("c overflow after division".to_string()));
-        }
-        c = U256::from_limbs([limbs[0], limbs[1], limbs[2], limbs[3]]);
-    }
-    println!("c after first loop: {}", c);
-
-    let c_div_factor = ann_for_c.checked_mul(n_coins).ok_or(ArbRsError::CalculationError("c_div_factor overflow".to_string()))?;
-    if c_div_factor.is_zero() {
-        return Err(ArbRsError::CalculationError("Division by zero in get_y c update".to_string()));
-    }
-    
-    let c_numerator_512 = c.widening_mul(d);
-
-    let c_512 = c_numerator_512
-        .checked_div(U512::from(c_div_factor))
-        .ok_or(ArbRsError::CalculationError("c update failed".to_string()))?;
-    
-    let limbs = c_512.into_limbs();
-    if limbs[4..].iter().any(|&limb| limb != 0) {
-        println!("\n  !!!!!!!! OVERFLOW DETECTED AT FINAL C !!!!!!!");
-        println!("  c_512 = {}", c_512);
-        println!("  !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!\n");
-        return Err(ArbRsError::CalculationError("c overflow after final division".to_string()));
-    }
-    c = U256::from_limbs([limbs[0], limbs[1], limbs[2], limbs[3]]);
-    println!("c after final calculation: {}", c);
-
-    // let b = s.checked_add(d.checked_div(ann).ok_or(ArbRsError::CalculationError("b div failed".to_string()))?).ok_or(ArbRsError::CalculationError("b add overflow".to_string()))?;
-    let ann_for_b = amp_scaled.checked_mul(n_coins).ok_or(ArbRsError::CalculationError("ann_for_b overflow".to_string()))?;
-    let b_div_factor = d.checked_mul(A_PRECISION).ok_or(ArbRsError::CalculationError("b_div_factor overflow".to_string()))?;
-    let b = s.checked_add(b_div_factor.checked_div(ann_for_b).ok_or(ArbRsError::CalculationError("b div failed".to_string()))?).ok_or(ArbRsError::CalculationError("b add overflow".to_string()))?;
-    println!("b coefficient: {}", b);
-
-
-    let mut y = d;
-    for iter in 0..255 {
-        let y_prev = y;
-        println!("  y loop[{}]: y_prev = {}", iter, y_prev);
-        
-        let y_squared_512 = y.widening_mul(y);
-        let numerator_512 = y_squared_512.checked_add(U512::from(c))
-            .ok_or(ArbRsError::CalculationError("y update numerator 512 overflow".to_string()))?;
-
-        let two_y = y.checked_mul(U256::from(2)).ok_or(ArbRsError::CalculationError("2y overflow".to_string()))?;
-        let denominator = two_y.checked_add(b).ok_or(ArbRsError::CalculationError("y update denominator add overflow".to_string()))?
-                           .checked_sub(d).ok_or(ArbRsError::CalculationError("y update denominator sub underflow".to_string()))?;
-
-        if denominator.is_zero() {
-            return Err(ArbRsError::CalculationError("Division by zero in y update".to_string()));
-        }
-
-        let y_512 = numerator_512.checked_div(U512::from(denominator))
-            .ok_or(ArbRsError::CalculationError("y update div failed".to_string()))?;
-
-        let y_limbs = y_512.into_limbs();
-        if y_limbs[4..].iter().any(|&limb| limb != 0) {
-            return Err(ArbRsError::CalculationError("y overflow after division".to_string()));
-        }
-        y = U256::from_limbs([y_limbs[0], y_limbs[1], y_limbs[2], y_limbs[3]]);
-        println!("  y loop[{}]: y_new  = {}", iter, y);
-
-        if y > y_prev {
-            if y - y_prev <= U256::from(1) {
-                println!("--- Y calculation converged ---");
-                return Ok(y);
-            }
-        } else if y_prev - y <= U256::from(1) {
-            println!("--- Y calculation converged ---");
-            return Ok(y);
-        }
-    }
-
-    Err(ArbRsError::CalculationError("y calculation did not converge".to_string()))
-}
-
-/// Scales balances by their rate multipliers.
-fn xp(rates: &[U256], balances: &[U256]) -> Result<Vec<U256>, ArbRsError> {
-    rates
-        .iter()
-        .zip(balances.iter())
-        .map(|(&rate, &balance)| {
-            rate.checked_mul(balance)
-                .and_then(|product| product.checked_div(PRECISION))
-                .ok_or_else(|| ArbRsError::CalculationError("xp calculation failed".to_string()))
-        })
-        .collect()
-}
-
-/// Calculates the output amount `dy` for a given input amount `dx`.
-pub fn get_dy(
+/// Calculates the output balance `y` for a swap.
+/// It determines the invariant `D` internally.
+pub fn get_y(
     i: usize,
     j: usize,
-    dx: U256,
-    balances: &[U256],
+    x: U256,
+    xp: &[U256],
     amp: U256,
-    fee: U256,
-    rates: &[U256],
+    n_coins: usize,
+    d_variant: DVariant,
+    is_y_variant_group0: bool,
+    is_y_variant_group1: bool,
 ) -> Result<U256, ArbRsError> {
-    let xp = xp(rates, balances)?;
-    let x = xp[i]
-        .checked_add(dx.checked_mul(rates[i]).ok_or(ArbRsError::CalculationError("dx mul failed".to_string()))?
-                        .checked_div(PRECISION).ok_or(ArbRsError::CalculationError("dx div failed".to_string()))?)
-        .ok_or(ArbRsError::CalculationError("x overflow in get_dy".to_string()))?;
+    let effective_amp = if is_y_variant_group0 {
+        amp.checked_div(A_PRECISION)
+            .ok_or_else(|| ArbRsError::CalculationError("effective_amp div underflow".to_string()))?
+    } else {
+        amp
+    };
 
-    let y = get_y(i, j, x, &xp, amp)?;
+    println!("[get_y] effective_amp: {}", effective_amp);
 
-    let dy = xp[j].checked_sub(y).ok_or(ArbRsError::CalculationError("dy underflow".to_string()))?
-             .checked_sub(U256::from(1)).ok_or(ArbRsError::CalculationError("dy underflow".to_string()))?;
+    let d = get_d(xp, effective_amp, n_coins, d_variant)?;
+    if d.is_zero() { return Ok(U256::ZERO); }
+    
+    println!("[get_y] d: {}", d);
 
-    let fee_amount = fee.checked_mul(dy).ok_or(ArbRsError::CalculationError("fee_amount overflow".to_string()))?
-                     .checked_div(FEE_DENOMINATOR).ok_or(ArbRsError::CalculationError("fee_amount div failed".to_string()))?;
+    let n_coins_u256 = U256::from(n_coins);
+    let mut s = U256::ZERO;
+    let mut c = d;
+    
+    for k in 0..n_coins {
+        let _x = if k == i { x } else if k != j { xp[k] } else { continue; };
+        s += _x;
+        if _x.is_zero() { return Err(ArbRsError::CalculationError("Cannot calculate y with zero balance".to_string())); }
+        
+        let c_denominator = _x.checked_mul(n_coins_u256)
+            .ok_or_else(|| ArbRsError::CalculationError("y c term overflow".to_string()))?;
+        c = c.checked_mul(d)
+            .ok_or_else(|| ArbRsError::CalculationError("y c mul1 overflow".to_string()))?
+            .checked_div(c_denominator)
+            .ok_or_else(|| ArbRsError::CalculationError("y c div1 underflow".to_string()))?;
+    }
+    
+    let ann = effective_amp.checked_mul(n_coins_u256)
+        .ok_or_else(|| ArbRsError::CalculationError("y ann overflow".to_string()))?;
 
-    let dy_after_fee = dy.checked_sub(fee_amount).ok_or(ArbRsError::CalculationError("final dy underflow".to_string()))?;
+    let (b, c) = if is_y_variant_group1 {
+        let c_den = ann.checked_mul(n_coins_u256)
+            .ok_or_else(|| ArbRsError::CalculationError("y c den overflow".to_string()))?;
+        let c_final = c.checked_mul(d)
+            .ok_or_else(|| ArbRsError::CalculationError("y c mul2 overflow".to_string()))?
+            .checked_div(c_den)
+            .ok_or_else(|| ArbRsError::CalculationError("y c div2 underflow".to_string()))?;
+        let b_final = s + d.checked_div(ann)
+            .ok_or_else(|| ArbRsError::CalculationError("y b div underflow".to_string()))?;
+        (b_final, c_final)
+    } else {
+        let c_den = ann.checked_mul(n_coins_u256)
+            .ok_or_else(|| ArbRsError::CalculationError("y c den overflow".to_string()))?;
+        let c_final = c.checked_mul(d)
+            .ok_or_else(|| ArbRsError::CalculationError("y c mul2 overflow".to_string()))?
+            .checked_mul(A_PRECISION)
+            .ok_or_else(|| ArbRsError::CalculationError("y c mul3 overflow".to_string()))?
+            .checked_div(c_den)
+            .ok_or_else(|| ArbRsError::CalculationError("y c div2 underflow".to_string()))?;
+        let b_final = s + d.checked_mul(A_PRECISION)
+            .ok_or_else(|| ArbRsError::CalculationError("y b mul overflow".to_string()))?
+            .checked_div(ann)
+            .ok_or_else(|| ArbRsError::CalculationError("y b div underflow".to_string()))?;
+        (b_final, c_final)
+    };
+    
+    println!("[get_y] b: {}, c: {}", b, c);
 
-    dy_after_fee.checked_mul(PRECISION).ok_or(ArbRsError::CalculationError("dy final mul overflow".to_string()))?
-                .checked_div(rates[j]).ok_or(ArbRsError::CalculationError("dy final div failed".to_string()))
+    _get_y_loop(c, b, d)
 }
 
-/// Handles the ramping of the amplification coefficient `A`.
-pub fn a(
-    timestamp: u64,
-    initial_a: U256,
-    initial_a_time: u64,
-    future_a: U256,
-    future_a_time: u64,
+/// Calculates the balance of a single coin `y`, given a target invariant `D`.
+/// Used for `calc_withdraw_one_coin`.
+pub fn get_y_d(
+    amp: U256,
+    i: usize,
+    xp: &[U256],
+    d: U256,
+    n_coins: usize,
+    yd_variant: bool,
 ) -> Result<U256, ArbRsError> {
-    if timestamp < future_a_time {
-        let t0 = U256::from(initial_a_time);
-        let t1 = U256::from(future_a_time);
-        let time_elapsed = U256::from(timestamp)
-            .checked_sub(t0)
-            .ok_or_else(|| ArbRsError::CalculationError("Timestamp before initial_a_time".to_string()))?;
-        let time_range = t1
-            .checked_sub(t0)
-            .ok_or_else(|| ArbRsError::CalculationError("future_a_time before initial_a_time".to_string()))?;
-
-        if future_a > initial_a {
-            let a_range = future_a - initial_a;
-            let a_delta = a_range.checked_mul(time_elapsed).ok_or_else(|| ArbRsError::CalculationError("A delta mul overflow".to_string()))?
-                               .checked_div(time_range).ok_or_else(|| ArbRsError::CalculationError("A delta div failed".to_string()))?;
-            initial_a.checked_add(a_delta).ok_or_else(|| ArbRsError::CalculationError("Final A add overflow".to_string()))
-        } else {
-            let a_range = initial_a - future_a;
-            let a_delta = a_range.checked_mul(time_elapsed).ok_or_else(|| ArbRsError::CalculationError("A delta mul overflow".to_string()))?
-                               .checked_div(time_range).ok_or_else(|| ArbRsError::CalculationError("A delta div failed".to_string()))?;
-            initial_a.checked_sub(a_delta).ok_or_else(|| ArbRsError::CalculationError("Final A sub underflow".to_string()))
-        }
-    } else {
-        Ok(future_a)
+    if d.is_zero() { return Ok(U256::ZERO); }
+    
+    let n_coins_u256 = U256::from(n_coins);
+    let mut s = U256::ZERO;
+    let mut c = d;
+    
+    for k in 0..n_coins {
+        if k == i { continue; }
+        let x = xp[k];
+        s += x;
+        if x.is_zero() { return Err(ArbRsError::CalculationError("Cannot calculate y_d with zero balance".to_string())); }
+        c = c.checked_mul(d).ok_or(ArbRsError::CalculationError("y_d c mul1 overflow".to_string()))?
+            .checked_div(x.checked_mul(n_coins_u256).ok_or(ArbRsError::CalculationError("y_d c term overflow".to_string()))?)
+            .ok_or(ArbRsError::CalculationError("y_d c div1 underflow".to_string()))?;
     }
+
+    let ann = amp.checked_mul(n_coins_u256).ok_or(ArbRsError::CalculationError("y_d ann overflow".to_string()))?;
+    let (b, c) = if yd_variant {
+        let c_final = c.checked_mul(d).ok_or(ArbRsError::CalculationError("y_d c mul2 overflow".to_string()))?
+            .checked_mul(A_PRECISION).ok_or(ArbRsError::CalculationError("y_d c mul3 overflow".to_string()))?
+            .checked_div(ann.checked_mul(n_coins_u256).ok_or(ArbRsError::CalculationError("y_d c den overflow".to_string()))?)
+            .ok_or(ArbRsError::CalculationError("y_d c div2 underflow".to_string()))?;
+        let b_final = s + d.checked_mul(A_PRECISION).ok_or(ArbRsError::CalculationError("y_d b mul overflow".to_string()))?
+            .checked_div(ann).ok_or(ArbRsError::CalculationError("y_d b div underflow".to_string()))?;
+        (b_final, c_final)
+    } else {
+        let c_final = c.checked_mul(d).ok_or(ArbRsError::CalculationError("y_d c mul2 overflow".to_string()))?
+            .checked_div(ann.checked_mul(n_coins_u256).ok_or(ArbRsError::CalculationError("y_d c den overflow".to_string()))?)
+            .ok_or(ArbRsError::CalculationError("y_d c div2 underflow".to_string()))?;
+        let b_final = s + d.checked_div(ann).ok_or(ArbRsError::CalculationError("y_d b div underflow".to_string()))?;
+        (b_final, c_final)
+    };
+
+    _get_y_loop(c, b, d)
+}
+
+/// Calculates the adjusted fee rate for pools with dynamic fees.
+///
+/// # Formula
+/// `fee_gamma / (fee_gamma + (1 - K))` where `K = prod(x) / (sum(x)/N)**N`
+pub fn dynamic_fee(
+    xpi: U256,
+    xpj: U256,
+    fee: U256,
+    feemul: U256,
+) -> Result<U256, ArbRsError> {
+    if feemul <= FEE_DENOMINATOR {
+        return Ok(fee);
+    }
+    let xps2 = (xpi + xpj).pow(U256::from(2));
+    if xps2.is_zero() {
+        return Ok(fee);
+    }
+
+    let term1 = (feemul - FEE_DENOMINATOR)
+        .checked_mul(U256::from(4))
+        .ok_or_else(|| ArbRsError::CalculationError("dyn_fee term1_1 overflow".to_string()))?
+        .checked_mul(xpi)
+        .ok_or_else(|| ArbRsError::CalculationError("dyn_fee term1_2 overflow".to_string()))?
+        .checked_mul(xpj)
+        .ok_or_else(|| ArbRsError::CalculationError("dyn_fee term1_3 overflow".to_string()))?
+        .checked_div(xps2)
+        .ok_or_else(|| ArbRsError::CalculationError("dyn_fee term1 div underflow".to_string()))?;
+
+    let denominator = term1 + FEE_DENOMINATOR;
+    
+    feemul
+        .checked_mul(fee)
+        .ok_or_else(|| ArbRsError::CalculationError("dyn_fee numerator overflow".to_string()))?
+        .checked_div(denominator)
+        .ok_or_else(|| ArbRsError::CalculationError("dyn_fee final div underflow".to_string()))
 }

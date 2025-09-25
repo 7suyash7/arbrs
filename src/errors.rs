@@ -1,3 +1,4 @@
+use alloy::transports::{RpcError, TransportErrorKind};
 use alloy_primitives::Address;
 use thiserror::Error;
 
@@ -34,4 +35,13 @@ pub enum ArbRsError {
 
     #[error("ABI Decode Error: {0}")]
     SolAbiError(#[from] alloy_sol_types::Error),
+
+    #[error("This pool is known to be broken and is not supported.")]
+    BrokenPool,
+}
+
+impl From<RpcError<TransportErrorKind>> for ArbRsError {
+    fn from(error: RpcError<TransportErrorKind>) -> Self {
+        ArbRsError::ProviderError(error.to_string())
+    }
 }
