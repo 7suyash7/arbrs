@@ -10,6 +10,7 @@ pub enum DVariant {
     Group2,
     Group3,
     Group4,
+    Legacy,
 }
 
 static D_VARIANT_GROUP_0: Lazy<HashSet<Address>> = Lazy::new(|| {

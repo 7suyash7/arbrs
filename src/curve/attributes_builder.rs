@@ -2,7 +2,7 @@ use crate::core::token::Token;
 use crate::curve::pool_attributes::{
   CalculationStrategy, PoolAttributes, PoolVariant, SwapStrategyType,
 };
-use crate::curve::pool_overrides;
+use crate::curve::pool_overrides::{self, DVariant};
 use crate::curve::registry::CurveRegistry;
 use crate::errors::ArbRsError;
 use crate::manager::token_manager::TokenManager;
@@ -38,6 +38,7 @@ const LENDING_POOLS: &[Address] = &[
     GUSD_METAPOOL,
     YEARN_POOL,
     BUSD_YEARN_POOL,
+    STETH_POOL,
     address!("A5407eAE9Ba41422680e2e00537571bcC53efBfD"), // sUSD
     address!("2dded6Da1BF5DBdF597C45fcFaa3194e53EcfeAF"), // LUSD/3CRV
     address!("A5407eAE9Ba41422680e2e00537571bcC53efBfD"), // sUSD
@@ -60,7 +61,7 @@ const UNSCALED_POOLS: &[Address] = &[
 ];
 
 const DYNAMIC_FEE_POOLS: &[Address] = &[
-    STETH_POOL, 
+    // STETH_POOL, 
     MIM_METAPOOL
 ];
 
@@ -118,7 +119,14 @@ pub async fn build_attributes<P: Provider + Send + Sync + 'static + ?Sized>(
         oracle_method: None,
     };
 
+    if ADMIN_FEE_POOLS.contains(&address) || DYNAMIC_FEE_POOLS.contains(&address) {
+        attributes.d_variant = DVariant::Legacy;
+    }
+
     println!("[Attributes Builder] Applying specific overrides for {}", address);
+    if UNSCALED_POOLS.contains(&address) || ADMIN_FEE_POOLS.contains(&address) {
+        attributes.d_variant = DVariant::Legacy;
+    }
     match address {
         COMPOUND_POOL => {
             attributes.pool_variant = PoolVariant::Lending;
@@ -194,26 +202,6 @@ pub async fn build_attributes<P: Provider + Send + Sync + 'static + ?Sized>(
             println!("[Attributes Builder] No specific overrides for this pool.");
         }
     }
-
-    // if let Some(base_pool_address) = registry.get_base_pool(address).await? {
-    //     println!("[Attributes Builder] Pool is a metapool. Building base pool attributes.");
-    //     attributes.pool_variant = PoolVariant::Meta;
-
-    //     let base_pool_lp_token = tokens.last().cloned().ok_or(ArbRsError::DataFetchError(address))?;
-    //     let base_pool_tokens = crate::curve::pool::CurveStableswapPool::fetch_coins(&base_pool_address, provider, token_manager).await?;
-        
-    //     attributes.base_pool = Some(BasePoolAttributes {
-    //         address: base_pool_address,
-    //         lp_token: base_pool_lp_token.clone(),
-    //         tokens: base_pool_tokens.clone(),
-    //         n_coins: base_pool_tokens.len(),
-    //         precision_multipliers: base_pool_tokens.iter().map(|t| U256::from(10).pow(U256::from(18 - t.decimals()))).collect(),
-    //         strategy: CalculationStrategy::Modern,
-    //         d_variant: pool_overrides::get_d_variant(&base_pool_address),
-    //         y_variant: pool_overrides::get_y_variant(&base_pool_address),
-    //     });
-    // }
-
     println!("[Attributes Builder] Final attributes built successfully.");
     Ok(attributes)
 }

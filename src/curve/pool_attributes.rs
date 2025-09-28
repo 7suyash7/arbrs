@@ -1,12 +1,5 @@
-use crate::core::token::Token;
 use crate::curve::pool_overrides::{DVariant, YVariant};
-use crate::curve::strategies::{
-    DefaultStrategy, DynamicFeeStrategy, LendingStrategy, MetapoolStrategy, TricryptoStrategy,
-    UnscaledStrategy,
-};
 use alloy_primitives::{Address, U256};
-use alloy_provider::Provider;
-use std::sync::Arc;
 
 /// High-level classification of a Curve pool's structure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

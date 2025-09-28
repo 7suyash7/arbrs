@@ -13,6 +13,7 @@ sol! {
         function get_underlying_coins(address pool) external view returns (address[8]);
     }
 
+    // Interface for a generic Curve pool to get its coins
     interface ICurvePool {
         function coins(uint256 i) external view returns (address);
     }
@@ -69,6 +70,7 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> CurveRegistry<P> {
         metapool_address: Address,
     ) -> Result<Option<Address>, ArbRsError> {
         // A metapool's second coin (index 1) is the LP token of its base pool.
+        println!("[get_base_pool] Checking for base pool for {}", metapool_address);
         let get_coin_call = ICurvePool::coinsCall { i: U256::from(1) };
         let request = TransactionRequest::default()
             .to(metapool_address)
@@ -77,8 +79,12 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> CurveRegistry<P> {
         let base_lp_token = match self.provider.call(request).await {
             Ok(bytes) => ICurvePool::coinsCall::abi_decode_returns(&bytes)?,
             // If coins(1) reverts, it's not a metapool (or only has one coin).
-            Err(_) => return Ok(None), 
+            Err(e) => {
+                println!("[get_base_pool] Call to coins(1) failed: {}. Assuming not a metapool.", e);
+                return Ok(None)
+            }, 
         };
+        println!("[get_base_pool] Found potential LP token: {}", base_lp_token);
 
         if base_lp_token.is_zero() {
             return Ok(None);

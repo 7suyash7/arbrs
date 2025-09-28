@@ -1,4 +1,4 @@
-use crate::curve::pool::{self, CurveStableswapPool};
+use crate::curve::pool::{CurveStableswapPool};
 use crate::curve::registry::CurveRegistry;
 use crate::errors::ArbRsError;
 use crate::manager::token_manager::TokenManager;
@@ -118,7 +118,7 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> CurvePoolManager<P> {
             CurveStableswapPool::new(
                 pool_address,
                 self.provider.clone(),
-                &self.token_manager,
+                self.token_manager.clone(),
                 &self.curve_registry,
             )
             .await?,

@@ -37,6 +37,7 @@ pub trait LiquidityPool<P: Provider + Send + Sync + 'static + ?Sized>: Debug + S
         token_in: &Token<P>,
         token_out: &Token<P>,
         amount_in: U256,
+        block_number: Option<u64>,
     ) -> Result<U256, ArbRsError>;
 
     /// Calculates the required input amount for a given input and output token.

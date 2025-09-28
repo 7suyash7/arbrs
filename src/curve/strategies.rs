@@ -1,5 +1,5 @@
 use crate::curve::constants::{FEE_DENOMINATOR, PRECISION};
-use crate::curve::pool_overrides::{Y_VARIANT_GROUP_0, Y_VARIANT_GROUP_1};
+use crate::curve::pool_overrides::{DVariant, Y_VARIANT_GROUP_0, Y_VARIANT_GROUP_1};
 use crate::curve::{math, tricrypto_math};
 use crate::curve::pool::{accrualBlockNumberCall, exchangeRateStoredCall, supplyRatePerBlockCall, CurveStableswapPool};
 use crate::errors::ArbRsError;
@@ -15,10 +15,12 @@ use async_trait::async_trait;
 const STETH_USDC_METAPOOL: Address = address!("C61557C5d177bd7DC889A3b621eEC333e168f68A");
 const RETH_ETH_METAPOOL: Address = address!("618788357D0EBd8A37e763ADab3bc575D54c2C7d");
 const COMPOUND_POOL_ADDRESS: Address = address!("A2B47E3D5c44877cca798226B7B8118F9BFb7A56");
+const AAVE_POOL_ADDRESS: Address = address!("52EA46506B9CC5Ef470C5bf89f17Dc28bB35D85C");
 
 // These addresses use a slightly different final `dy` calculation
 const LENDING_GROUP_A: &[Address] = &[
     COMPOUND_POOL_ADDRESS,
+    AAVE_POOL_ADDRESS,
     address!("A5407eAE9Ba41422680e2e00537571bcC53efBfD"), // sUSD
     address!("45F783CCE6B7FF23B2ab2D70e416cdb7D6055f51"), // bUSD/y
     address!("79a8C46DeA5aDa233ABaFFD40F3A0A2B1e5A4F27"), // y
@@ -42,6 +44,7 @@ pub struct SwapParams<'a, P: Provider + Send + Sync + 'static + ?Sized> {
     pub pool: &'a CurveStableswapPool<P>,
     /// The timestamp of the block for which the calculation is being performed.
     pub block_timestamp: u64,
+    pub block_number: u64,
 }
 
 /// A trait that defines a common interface for all Curve swap calculation strategies.
@@ -62,8 +65,8 @@ pub struct DefaultStrategy;
 #[async_trait]
 impl<P: Provider + Send + Sync + 'static + ?Sized> SwapStrategy<P> for DefaultStrategy {
     async fn calculate_dy(&self, params: &SwapParams<'_, P>) -> Result<U256, ArbRsError> {
-        let SwapParams { i, j, dx, pool, block_timestamp } = params;
-        let (i, j, dx, block_timestamp) = (*i, *j, *dx, *block_timestamp);
+        let SwapParams { i, j, dx, pool, block_timestamp, block_number } = params;
+        let (i, j, dx, block_timestamp, _block_number) = (*i, *j, *dx, *block_timestamp, *block_number);
 
         let balances = pool.balances.read().await;
         let attributes = &pool.attributes;
@@ -120,8 +123,8 @@ pub struct MetapoolStrategy;
 #[async_trait]
 impl<P: Provider + Send + Sync + 'static + ?Sized> SwapStrategy<P> for MetapoolStrategy {
     async fn calculate_dy(&self, params: &SwapParams<'_, P>) -> Result<U256, ArbRsError> {
-        let SwapParams { i, j, dx, pool, block_timestamp } = params;
-        let (i, j, dx, block_timestamp) = (*i, *j, *dx, *block_timestamp);
+        let SwapParams { i, j, dx, pool, block_timestamp, block_number } = params;
+        let (i, j, dx, block_timestamp, _block_number) = (*i, *j, *dx, *block_timestamp, *block_number);
 
         let balances = pool.balances.read().await;
         let attributes = &pool.attributes;
@@ -189,22 +192,22 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> SwapStrategy<P> for MetapoolS
 /// Strategy for pools with lending tokens (aTokens, cTokens, yTokens) that require fetching live rates.
 #[derive(Debug, Default)]
 pub struct LendingStrategy;
+
 #[async_trait]
 impl<P: Provider + Send + Sync + 'static + ?Sized> SwapStrategy<P> for LendingStrategy {
     async fn calculate_dy(&self, params: &SwapParams<'_, P>) -> Result<U256, ArbRsError> {
-        let SwapParams { i, j, dx, pool, block_timestamp } = params;
-        let (i, j, dx, block_timestamp) = (*i, *j, *dx, *block_timestamp);
+        let SwapParams { i, j, dx, pool, block_timestamp, block_number } = params;
+        let (i, j, dx, block_timestamp, block_number) = (*i, *j, *dx, *block_timestamp, *block_number);
 
         let balances = pool.balances.read().await;
         let attributes = &pool.attributes;
         let fee = *pool.fee.read().await;
         let provider = &pool.provider;
-        let block_number = provider.get_block_number().await?;
 
         let mut rates = Vec::with_capacity(attributes.n_coins);
         for (idx, token) in pool.tokens.iter().enumerate() {
             let final_rate = if attributes.use_lending[idx] {
-                if pool.address == COMPOUND_POOL_ADDRESS {
+                if pool.address == COMPOUND_POOL_ADDRESS || pool.address == AAVE_POOL_ADDRESS {
                     let rate_call = exchangeRateStoredCall {};
                     let rate_bytes = provider.call(TransactionRequest::default().to(token.address()).input(rate_call.abi_encode().into())).await?;
                     let mut rate = exchangeRateStoredCall::abi_decode_returns(&rate_bytes)?;
@@ -239,13 +242,13 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> SwapStrategy<P> for LendingSt
         }
 
         let amp = pool.a_precise(block_timestamp).await?;
-        let xp = math::xp(&rates, &balances)?;
+        let xp = math::xp(&rates, &*balances)?;
 
-        // --- FIXED: All checked math now correctly uses .ok_or_else ---
         let dx_scaled = dx.checked_mul(rates[i])
             .ok_or_else(|| ArbRsError::CalculationError("dx_scaled mul overflow".to_string()))?
             .checked_div(PRECISION)
             .ok_or_else(|| ArbRsError::CalculationError("dx_scaled div underflow".to_string()))?;
+
         let x = xp[i].checked_add(dx_scaled)
             .ok_or_else(|| ArbRsError::CalculationError("x add overflow".to_string()))?;
         
@@ -254,19 +257,18 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> SwapStrategy<P> for LendingSt
         
         let y = math::get_y(i, j, x, &xp, amp, attributes.n_coins, attributes.d_variant, is_y0, is_y1)?;
 
-        let dy_raw;
         let mut final_dy;
         if LENDING_GROUP_A.contains(&pool.address) {
-            dy_raw = xp[j].saturating_sub(y);
+            let dy_raw = xp[j].saturating_sub(y);
             final_dy = dy_raw.checked_mul(PRECISION)
                 .ok_or_else(|| ArbRsError::CalculationError("final_dy mul overflow".to_string()))?
                 .checked_div(rates[j])
                 .ok_or_else(|| ArbRsError::CalculationError("final_dy div underflow".to_string()))?;
         } else if LENDING_GROUP_B.contains(&pool.address) {
-            dy_raw = xp[j].saturating_sub(y);
+            let dy_raw = xp[j].saturating_sub(y);
             final_dy = dy_raw;
         } else {
-            dy_raw = xp[j].saturating_sub(y).saturating_sub(U256::from(1));
+            let dy_raw = xp[j].saturating_sub(y).saturating_sub(U256::from(1));
             final_dy = dy_raw.checked_mul(PRECISION)
                 .ok_or_else(|| ArbRsError::CalculationError("final_dy mul overflow".to_string()))?
                 .checked_div(rates[j])
@@ -277,6 +279,7 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> SwapStrategy<P> for LendingSt
             .ok_or_else(|| ArbRsError::CalculationError("fee_amount mul overflow".to_string()))?
             .checked_div(FEE_DENOMINATOR)
             .ok_or_else(|| ArbRsError::CalculationError("fee_amount div underflow".to_string()))?;
+            
         final_dy = final_dy.saturating_sub(fee_amount);
 
         Ok(final_dy)
@@ -290,26 +293,21 @@ pub struct UnscaledStrategy;
 #[async_trait]
 impl<P: Provider + Send + Sync + 'static + ?Sized> SwapStrategy<P> for UnscaledStrategy {
     async fn calculate_dy(&self, params: &SwapParams<'_, P>) -> Result<U256, ArbRsError> {
-        let SwapParams { i, j, dx, pool, block_timestamp } = params;
-        let (i, j, dx, block_timestamp) = (*i, *j, *dx, *block_timestamp);
+        let SwapParams { i, j, dx, pool, block_timestamp, block_number } = params;
+        let (i, j, dx, block_timestamp, _block_number) = (*i, *j, *dx, *block_timestamp, *block_number);
 
-        // 1. Get required state from the pool
         let balances = pool.balances.read().await;
         let attributes = &pool.attributes;
         let fee = *pool.fee.read().await;
 
-        // 2. Get the precise, time-adjusted amplification factor
         let amp = pool.a_precise(block_timestamp).await?;
 
-        // 3. NOTE: For this strategy, `xp` is just the balances, no scaling is applied.
         let xp = balances.clone();
 
-        // 4. NOTE: The input amount `dx` is also not scaled.
         let x = xp[i]
             .checked_add(dx)
             .ok_or_else(|| ArbRsError::CalculationError("x add overflow".to_string()))?;
 
-        // 5. Solve for the new output balance `y` using our math helper
         let is_y0 = Y_VARIANT_GROUP_0.contains(&pool.address);
         let is_y1 = Y_VARIANT_GROUP_1.contains(&pool.address);
         let y = math::get_y(
@@ -320,10 +318,8 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> SwapStrategy<P> for UnscaledS
             is_y1
         )?;
 
-        // 6. Calculate the raw output `dy`
         let dy = xp[j].saturating_sub(y).saturating_sub(U256::from(1));
 
-        // 7. Calculate and apply the fee
         let fee_amount = dy
             .checked_mul(fee)
             .ok_or_else(|| ArbRsError::CalculationError("fee_amount mul overflow".to_string()))?
@@ -332,7 +328,6 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> SwapStrategy<P> for UnscaledS
 
         let final_dy = dy.saturating_sub(fee_amount);
 
-        // 8. NOTE: The final result is NOT unscaled by a rate.
         Ok(final_dy)
     }
 }
@@ -341,93 +336,43 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> SwapStrategy<P> for UnscaledS
 #[derive(Debug, Default)]
 pub struct DynamicFeeStrategy;
 
-// #[async_trait]
-// impl<P: Provider + Send + Sync + 'static + ?Sized> SwapStrategy<P> for DynamicFeeStrategy {
-//     async fn calculate_dy(&self, params: &SwapParams<'_, P>) -> Result<U256, ArbRsError> {
-//         let SwapParams { i, j, dx, pool, block_timestamp } = params;
-//         let (i, j, dx, block_timestamp) = (*i, *j, *dx, *block_timestamp);
-
-//         // 1. Get pool state and fetch admin balances
-//         let live_balances = pool.balances.read().await;
-//         let admin_balances = pool.get_admin_balances().await?;
-//         let attributes = &pool.attributes;
-//         let fee = *pool.fee.read().await;
-
-//         if live_balances.len() != admin_balances.len() {
-//             return Err(ArbRsError::CalculationError("Balance length mismatch".to_string()));
-//         }
-
-//         // 2. Calculate net balances (live - admin)
-//         let net_balances: Vec<U256> = live_balances
-//             .iter()
-//             .zip(admin_balances.iter())
-//             .map(|(live, admin)| live.saturating_sub(*admin))
-//             .collect();
-
-//         let amp = pool.a_precise(block_timestamp).await?;
-//         let offpeg_fee_multiplier = attributes.offpeg_fee_multiplier
-//             .ok_or_else(|| ArbRsError::CalculationError("Missing offpeg_fee_multiplier".to_string()))?;
-
-//         // 3. Handle scaled (MIM) vs. unscaled (stETH) variations
-//         let (xp, x, y, dy_unscaled) = if attributes.rates == attributes.precision_multipliers {
-//             // Unscaled path (like stETH)
-//             let xp = net_balances;
-//             let x = xp[i].checked_add(dx).ok_or_else(|| ArbRsError::CalculationError("x add overflow".to_string()))?;
-//             let is_y0 = Y_VARIANT_GROUP_0.contains(&pool.address);
-//             let is_y1 = Y_VARIANT_GROUP_1.contains(&pool.address);
-//             let y = math::get_y(
-//                 i, j, x, &xp, amp, 
-//                 attributes.n_coins, 
-//                 attributes.d_variant, 
-//                 is_y0, 
-//                 is_y1
-//             )?;
-//             let dy_unscaled = xp[j].saturating_sub(y);
-//             (xp, x, y, dy_unscaled)
-//         } else {
-//             // Scaled path (like MIM, which uses precision_multipliers as rates)
-//             let xp = math::xp(&attributes.precision_multipliers, &net_balances)?;
-//             let dx_scaled = dx.checked_mul(attributes.precision_multipliers[i]).ok_or_else(|| ArbRsError::CalculationError("dx_scaled mul overflow".to_string()))?;
-//             let x = xp[i].checked_add(dx_scaled).ok_or_else(|| ArbRsError::CalculationError("x add overflow".to_string()))?;
-
-//             let is_y0 = Y_VARIANT_GROUP_0.contains(&pool.address);
-//             let is_y1 = Y_VARIANT_GROUP_1.contains(&pool.address);
-//             let y = math::get_y(
-//                 i, j, x, &xp, amp, 
-//                 attributes.n_coins, 
-//                 attributes.d_variant, 
-//                 is_y0, 
-//                 is_y1
-//             )?;
-            
-//             let rate_j = attributes.precision_multipliers[j];
-//             if rate_j.is_zero() { return Err(ArbRsError::CalculationError("Output token rate is zero".to_string())); }
-//             let dy_unscaled = xp[j].saturating_sub(y).checked_div(rate_j).unwrap_or_default();
-//             (xp, x, y, dy_unscaled)
-//         };
-
-//         // 4. Calculate and apply the dynamic fee
-//         let xpi_avg = xp[i].checked_add(x).unwrap_or_default() / U256::from(2);
-//         let xpj_avg = xp[j].checked_add(y).unwrap_or_default() / U256::from(2);
-
-//         let adjusted_fee_rate = math::dynamic_fee(xpi_avg, xpj_avg, fee, offpeg_fee_multiplier)?;
-        
-//         let fee_amount = dy_unscaled
-//             .checked_mul(adjusted_fee_rate)
-//             .ok_or_else(|| ArbRsError::CalculationError("fee_amount mul overflow".to_string()))?
-//             .checked_div(FEE_DENOMINATOR)
-//             .ok_or_else(|| ArbRsError::CalculationError("fee_amount div underflow".to_string()))?;
-
-//         Ok(dy_unscaled.saturating_sub(fee_amount))
-//     }
-// }
 #[async_trait]
 impl<P: Provider + Send + Sync + 'static + ?Sized> SwapStrategy<P> for DynamicFeeStrategy {
     async fn calculate_dy(&self, params: &SwapParams<'_, P>) -> Result<U256, ArbRsError> {
-        // NOTE: The on-chain `get_dy` for the stETH pool is unscaled and does NOT use net admin balances.
-        // It's a simplified view function. We are mirroring it exactly.
-        let unscaled_strategy = UnscaledStrategy;
-        unscaled_strategy.calculate_dy(params).await
+        let SwapParams { i, j, dx, pool, block_timestamp, .. } = params;
+        let (i, j, dx) = (*i, *j, *dx);
+
+        let live_balances = pool.fetch_balances_by_balance_of().await?; // Use balanceOf
+        let admin_balances = pool.get_admin_balances().await?;
+        let net_balances: Vec<U256> = live_balances.iter().zip(admin_balances.iter()).map(|(l, a)| l.saturating_sub(*a)).collect();
+        
+        let attributes = &pool.attributes;
+        let fee = *pool.fee.read().await;
+        let amp = pool.a_precise(*block_timestamp).await?;
+        let xp = net_balances; // Unscaled
+
+        let x = xp[i].checked_add(dx)
+            .ok_or_else(|| ArbRsError::CalculationError("x add overflow".to_string()))?;
+        
+        let is_y0 = Y_VARIANT_GROUP_0.contains(&pool.address);
+        let is_y1 = Y_VARIANT_GROUP_1.contains(&pool.address);
+        
+        let y = math::get_y(i, j, x, &xp, amp, attributes.n_coins, attributes.d_variant, is_y0, is_y1)?;
+
+        let dy_raw = xp[j].saturating_sub(y);
+        
+        let xpi_avg = (xp[i] + x) / U256::from(2);
+        let xpj_avg = (xp[j] + y) / U256::from(2);
+        
+        let offpeg_fee_multiplier = attributes.offpeg_fee_multiplier.ok_or_else(|| ArbRsError::CalculationError("Missing offpeg_fee_multiplier".to_string()))?;
+        let adjusted_fee_rate = math::dynamic_fee(xpi_avg, xpj_avg, fee, offpeg_fee_multiplier)?;
+        
+        let fee_amount = dy_raw.checked_mul(adjusted_fee_rate)
+            .ok_or_else(|| ArbRsError::CalculationError("fee_amount mul overflow".to_string()))?
+            .checked_div(FEE_DENOMINATOR)
+            .ok_or_else(|| ArbRsError::CalculationError("fee_amount div underflow".to_string()))?;
+
+        Ok(dy_raw.saturating_sub(fee_amount))
     }
 }
 
@@ -438,25 +383,23 @@ pub struct TricryptoStrategy;
 #[async_trait]
 impl<P: Provider + Send + Sync + 'static + ?Sized> SwapStrategy<P> for TricryptoStrategy {
     async fn calculate_dy(&self, params: &SwapParams<'_, P>) -> Result<U256, ArbRsError> {
-        let SwapParams { i, j, dx, pool, block_timestamp } = params;
-        let (i, j, dx, block_timestamp) = (*i, *j, *dx, *block_timestamp);
+        let SwapParams { i, j, dx, pool, block_timestamp, block_number } = params;
+        let (i, j, dx, block_timestamp, _block_number) = (*i, *j, *dx, *block_timestamp, *block_number);
 
         let attributes = &pool.attributes;
         let balances = pool.balances.read().await;
         
         let block_number = pool.provider.get_block_number().await?;
 
-        // 1. Fetch Tricrypto-specific on-chain state
         let price_scale = pool.get_tricrypto_price_scale(block_number).await?;
         let gamma = pool.get_tricrypto_gamma(block_number).await?;
         let d = pool.get_tricrypto_d(block_number).await?;
         let amp = pool.a_precise(block_timestamp).await?;
 
-        // 2. Custom `xp` and `x` calculation
         let precisions = [
-            U256::from(10).pow(U256::from(12)), // USDT
-            U256::from(10).pow(U256::from(10)), // WBTC
-            U256::from(1),                     // WETH
+            U256::from(10).pow(U256::from(12)),
+            U256::from(10).pow(U256::from(10)),
+            U256::from(1),
         ];
 
         let mut xp = balances.clone();
@@ -469,18 +412,15 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> SwapStrategy<P> for Tricrypto
                 .checked_div(PRECISION).ok_or(ArbRsError::CalculationError("xp div underflow".to_string()))?;
         }
 
-        // 3. Solve for `y` using the custom Newton's method
         let y = tricrypto_math::newton_y(amp, gamma, &xp, d, j)?;
         let mut dy = xp[j].saturating_sub(y).saturating_sub(U256::from(1));
 
-        // 4. Unscale `dy`
         if j > 0 {
             dy = dy.checked_mul(PRECISION).ok_or(ArbRsError::CalculationError("dy mul overflow".to_string()))?
                 .checked_div(price_scale[j - 1]).ok_or(ArbRsError::CalculationError("dy div underflow".to_string()))?;
         }
         dy /= precisions[j];
 
-        // 5. Calculate and apply the fee
         let mut xp_post_swap = xp.clone();
         xp_post_swap[j] = y;
         let fee_gamma = attributes.fee_gamma.unwrap_or_default();
@@ -506,26 +446,17 @@ pub struct OracleStrategy;
 #[async_trait]
 impl<P: Provider + Send + Sync + 'static + ?Sized> SwapStrategy<P> for OracleStrategy {
     async fn calculate_dy(&self, params: &SwapParams<'_, P>) -> Result<U256, ArbRsError> {
-        let SwapParams { i, j, dx, pool, block_timestamp } = params;
-        let (i, j, dx, block_timestamp) = (*i, *j, *dx, *block_timestamp);
+        let SwapParams { i, j, dx, pool, block_timestamp, block_number } = params;
+        let (i, j, dx, block_timestamp, _block_number) = (*i, *j, *dx, *block_timestamp, *block_number);
 
         let attributes = &pool.attributes;
         let fee = *pool.fee.read().await;
-        
-        // 1. Get net balances (live - admin)
-        let live_balances = pool.balances.read().await;
-        let admin_balances = pool.get_admin_balances().await?;
-        let net_balances: Vec<U256> = live_balances
-            .iter()
-            .zip(admin_balances.iter())
-            .map(|(live, admin)| live.saturating_sub(*admin))
-            .collect();
-        
-        // 2. Fetch live rates from the oracle
+
+        let net_balances = pool.balances.read().await.clone();
+
         let block_number = pool.provider.get_block_number().await?;
         let rates = pool.get_oracle_rates(block_number).await?;
-        
-        // --- 3. Perform the standard swap calculation on the prepared data ---
+
         let amp = pool.a_precise(block_timestamp).await?;
         let xp = math::xp(&rates, &net_balances)?;
 
@@ -574,82 +505,24 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> SwapStrategy<P> for OracleStr
 #[derive(Debug, Default)]
 pub struct AdminFeeStrategy;
 
-// #[async_trait]
-// impl<P: Provider + Send + Sync + 'static + ?Sized> SwapStrategy<P> for AdminFeeStrategy {
-//     async fn calculate_dy(&self, params: &SwapParams<'_, P>) -> Result<U256, ArbRsError> {
-//         let SwapParams { i, j, dx, pool, block_timestamp } = params;
-//         let (i, j, dx, block_timestamp) = (*i, *j, *dx, *block_timestamp);
-
-//         // 1. Fetch Fresh Balances
-//         let live_balances = pool.fetch_balances().await?;
-//         let admin_balances = pool.get_admin_balances().await?;
-        
-//         let attributes = &pool.attributes;
-//         let fee = *pool.fee.read().await;
-
-//         if live_balances.len() != admin_balances.len() {
-//             return Err(ArbRsError::CalculationError("Balance length mismatch".to_string()));
-//         }
-//         let net_balances: Vec<U256> = live_balances
-//             .iter()
-//             .zip(admin_balances.iter())
-//             .map(|(live, admin)| live.saturating_sub(*admin))
-//             .collect();
-        
-//         // --- 2. Perform the standard swap calculation using the net balances ---
-//         let amp = pool.a_precise(block_timestamp).await?;
-//         let rates = &attributes.rates;
-//         let xp = math::xp(rates, &net_balances)?;
-
-//         let dx_scaled = dx.checked_mul(rates[i])
-//             .ok_or_else(|| ArbRsError::CalculationError("dx_scaled mul overflow".to_string()))?
-//             .checked_div(PRECISION)
-//             .ok_or_else(|| ArbRsError::CalculationError("dx_scaled div underflow".to_string()))?;
-
-//         let x = xp[i].checked_add(dx_scaled)
-//             .ok_or_else(|| ArbRsError::CalculationError("x add overflow".to_string()))?;
-        
-//         let is_y0 = Y_VARIANT_GROUP_0.contains(&pool.address);
-//         let is_y1 = Y_VARIANT_GROUP_1.contains(&pool.address);
-        
-//         let y = math::get_y(i, j, x, &xp, amp, attributes.n_coins, attributes.d_variant, is_y0, is_y1)?;
-
-//         let dy = xp[j].saturating_sub(y).saturating_sub(U256::from(1));
-
-//         let fee_amount = dy.checked_mul(fee)
-//             .ok_or_else(|| ArbRsError::CalculationError("fee_amount mul overflow".to_string()))?
-//             .checked_div(FEE_DENOMINATOR)
-//             .ok_or_else(|| ArbRsError::CalculationError("fee_amount div underflow".to_string()))?;
-            
-//         let dy_after_fee = dy.saturating_sub(fee_amount);
-        
-//         let rate_j = rates[j];
-//         if rate_j.is_zero() { return Err(ArbRsError::CalculationError("Output token rate is zero".to_string())); }
-
-//         let final_dy = dy_after_fee.checked_mul(PRECISION)
-//             .ok_or_else(|| ArbRsError::CalculationError("final_dy mul overflow".to_string()))?
-//             .checked_div(rate_j)
-//             .ok_or_else(|| ArbRsError::CalculationError("final_dy div underflow".to_string()))?;
-
-//         Ok(final_dy)
-//     }
-// }
-
 #[async_trait]
 impl<P: Provider + Send + Sync + 'static + ?Sized> SwapStrategy<P> for AdminFeeStrategy {
     async fn calculate_dy(&self, params: &SwapParams<'_, P>) -> Result<U256, ArbRsError> {
-        // NOTE: To match the on-chain `get_dy` function, this strategy uses the gross balances.
-        // The logic is therefore identical to the DefaultStrategy for this specific calculation.
-        let SwapParams { i, j, dx, pool, block_timestamp } = params;
-        let (i, j, dx, block_timestamp) = (*i, *j, *dx, *block_timestamp);
+        let SwapParams { i, j, dx, pool, block_timestamp, .. } = params;
+        let (i, j, dx) = (*i, *j, *dx);
 
-        let balances = pool.balances.read().await;
+        let live_balances = pool.fetch_balances_by_balance_of().await?; // Use balanceOf
+        let admin_balances = pool.get_admin_balances().await?;
+        let net_balances: Vec<U256> = live_balances.iter().zip(admin_balances.iter()).map(|(l, a)| l.saturating_sub(*a)).collect();
+        println!("[AdminFeeStrategy] Live Balances:  {:?}", live_balances);
+        println!("[AdminFeeStrategy] Admin Balances: {:?}", admin_balances);
+        println!("[AdminFeeStrategy] Net Balances:   {:?}", net_balances);
+
         let attributes = &pool.attributes;
         let fee = *pool.fee.read().await;
-
-        let amp = pool.a_precise(block_timestamp).await?;
+        let amp = pool.a_precise(*block_timestamp).await?;
         let rates = &attributes.rates;
-        let xp = math::xp(rates, &*balances)?;
+        let xp = math::xp(rates, &net_balances)?;
 
         let dx_scaled = dx.checked_mul(rates[i])
             .ok_or_else(|| ArbRsError::CalculationError("dx_scaled mul overflow".to_string()))?
@@ -662,7 +535,7 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> SwapStrategy<P> for AdminFeeS
         let is_y0 = Y_VARIANT_GROUP_0.contains(&pool.address);
         let is_y1 = Y_VARIANT_GROUP_1.contains(&pool.address);
         
-        let y = math::get_y(i, j, x, &xp, amp, attributes.n_coins, attributes.d_variant, is_y0, is_y1)?;
+        let y = math::get_y(i, j, x, &xp, amp, attributes.n_coins, DVariant::Legacy, is_y0, is_y1)?;
 
         let dy = xp[j].saturating_sub(y).saturating_sub(U256::from(1));
 
@@ -675,7 +548,7 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> SwapStrategy<P> for AdminFeeS
         
         let rate_j = rates[j];
         if rate_j.is_zero() { return Err(ArbRsError::CalculationError("Output token rate is zero".to_string())); }
-
+        
         let final_dy = dy_after_fee.checked_mul(PRECISION)
             .ok_or_else(|| ArbRsError::CalculationError("final_dy mul overflow".to_string()))?
             .checked_div(rate_j)

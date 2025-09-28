@@ -1,4 +1,4 @@
-use crate::curve::pool_overrides::{DVariant, YVariant};
+use crate::curve::pool_overrides::DVariant;
 use crate::curve::constants::{A_PRECISION, FEE_DENOMINATOR, PRECISION};
 use crate::errors::ArbRsError;
 use alloy_primitives::U256;
@@ -17,7 +17,6 @@ pub fn xp(rates: &[U256], balances: &[U256]) -> Result<Vec<U256>, ArbRsError> {
     let mut xp_balances = Vec::with_capacity(balances.len());
 
     for (rate, balance) in rates.iter().zip(balances.iter()) {
-        // Perform the calculation with checked arithmetic to prevent overflow.
         let virtual_balance = rate
             .checked_mul(*balance)
             .ok_or_else(|| ArbRsError::CalculationError("xp mul overflow".to_string()))?
@@ -102,7 +101,7 @@ pub(super) fn calc_d_alpha(ann: U256, s: U256, d: U256, d_p: U256, n_coins: U256
 /// `y = (y^2 + c) / (2y + b - d)`
 fn _get_y_loop(c: U256, b: U256, d: U256) -> Result<U256, ArbRsError> {
     let mut y = d;
-    for _ in 0..255 {
+    for i in 0..255 {
         let y_prev = y;
         let numerator = y.pow(U256::from(2)) + c;
         let denominator = (y.checked_mul(U256::from(2))
@@ -113,6 +112,8 @@ fn _get_y_loop(c: U256, b: U256, d: U256) -> Result<U256, ArbRsError> {
             return Err(ArbRsError::CalculationError("y denominator is zero".to_string()));
         }
         y = numerator / denominator;
+
+        println!("[_get_y_loop] iter {}: y_prev={}, y_new={}", i, y_prev, y);
 
         if y > y_prev {
             if y - y_prev <= U256::from(1) {
@@ -139,13 +140,10 @@ pub fn get_d(
     let n_coins = U256::from(n_coins_usize);
     let s: U256 = xp.iter().sum();
 
-    if s.is_zero() {
-        return Ok(U256::ZERO);
-    }
+    if s.is_zero() { return Ok(U256::ZERO); }
 
     let mut d = s;
-    let ann = amp.checked_mul(n_coins)
-        .ok_or_else(|| ArbRsError::CalculationError("ann mul overflow".to_string()))?;
+    let ann = amp.checked_mul(n_coins).ok_or(ArbRsError::CalculationError("ann error bruv".to_string()))?;
 
     for _ in 0..255 {
         let d_prev = d;
@@ -154,18 +152,18 @@ pub fn get_d(
             DVariant::Group1 | DVariant::Group3 => calc_dp_alpha(d, xp, n_coins)?,
             DVariant::Group2 => calc_dp_beta(d, xp, n_coins)?,
             DVariant::Group4 => calc_dp_gamma(d, xp, n_coins)?,
+            // DVariant::LegacyPlusOne => calc_dp_default_plus_one(d, xp, n_coins)?,
             _ => calc_dp_default(d, xp, n_coins)?,
         };
 
         d = match d_variant {
             DVariant::Group0 | DVariant::Group1 => calc_d_alpha(ann, s, d, d_p, n_coins)?,
+            DVariant::Legacy => calc_d_default(ann, s, d, d_p, n_coins)?,
             _ => calc_d_default(ann, s, d, d_p, n_coins)?,
         };
 
         if d > d_prev {
-            if d - d_prev <= U256::from(1) {
-                return Ok(d);
-            }
+            if d - d_prev <= U256::from(1) { return Ok(d); }
         } else if d_prev - d <= U256::from(1) {
             return Ok(d);
         }
@@ -194,12 +192,8 @@ pub fn get_y(
         amp
     };
 
-    println!("[get_y] effective_amp: {}", effective_amp);
-
     let d = get_d(xp, effective_amp, n_coins, d_variant)?;
     if d.is_zero() { return Ok(U256::ZERO); }
-    
-    println!("[get_y] d: {}", d);
 
     let n_coins_u256 = U256::from(n_coins);
     let mut s = U256::ZERO;
@@ -221,6 +215,32 @@ pub fn get_y(
     let ann = effective_amp.checked_mul(n_coins_u256)
         .ok_or_else(|| ArbRsError::CalculationError("y ann overflow".to_string()))?;
 
+    // let (b, c) = if is_y_variant_group1 {
+    //     let c_den = ann.checked_mul(n_coins_u256)
+    //         .ok_or_else(|| ArbRsError::CalculationError("y c den overflow".to_string()))?;
+    //     let c_final = c.checked_mul(d)
+    //         .ok_or_else(|| ArbRsError::CalculationError("y c mul2 overflow".to_string()))?
+    //         .checked_div(c_den)
+    //         .ok_or_else(|| ArbRsError::CalculationError("y c div2 underflow".to_string()))?;
+    //     let b_final = s + d.checked_div(ann)
+    //         .ok_or_else(|| ArbRsError::CalculationError("y b div underflow".to_string()))?;
+    //     (b_final, c_final)
+    // } else {
+    //     let c_den = ann.checked_mul(n_coins_u256)
+    //         .ok_or_else(|| ArbRsError::CalculationError("y c den overflow".to_string()))?;
+    //     let c_final = c.checked_mul(d)
+    //         .ok_or_else(|| ArbRsError::CalculationError("y c mul2 overflow".to_string()))?
+    //         .checked_mul(A_PRECISION)
+    //         .ok_or_else(|| ArbRsError::CalculationError("y c mul3 overflow".to_string()))?
+    //         .checked_div(c_den)
+    //         .ok_or_else(|| ArbRsError::CalculationError("y c div2 underflow".to_string()))?;
+    //     let b_final = s + d.checked_mul(A_PRECISION)
+    //         .ok_or_else(|| ArbRsError::CalculationError("y b mul overflow".to_string()))?
+    //         .checked_div(ann)
+    //         .ok_or_else(|| ArbRsError::CalculationError("y b div underflow".to_string()))?;
+    //     (b_final, c_final)
+    // };
+
     let (b, c) = if is_y_variant_group1 {
         let c_den = ann.checked_mul(n_coins_u256)
             .ok_or_else(|| ArbRsError::CalculationError("y c den overflow".to_string()))?;
@@ -228,8 +248,9 @@ pub fn get_y(
             .ok_or_else(|| ArbRsError::CalculationError("y c mul2 overflow".to_string()))?
             .checked_div(c_den)
             .ok_or_else(|| ArbRsError::CalculationError("y c div2 underflow".to_string()))?;
-        let b_final = s + d.checked_div(ann)
-            .ok_or_else(|| ArbRsError::CalculationError("y b div underflow".to_string()))?;
+        let b_final = s.checked_add(d.checked_div(ann)
+            .ok_or_else(|| ArbRsError::CalculationError("y b div underflow".to_string()))?)
+            .ok_or_else(|| ArbRsError::CalculationError("y b add overflow".to_string()))?;
         (b_final, c_final)
     } else {
         let c_den = ann.checked_mul(n_coins_u256)
@@ -240,14 +261,13 @@ pub fn get_y(
             .ok_or_else(|| ArbRsError::CalculationError("y c mul3 overflow".to_string()))?
             .checked_div(c_den)
             .ok_or_else(|| ArbRsError::CalculationError("y c div2 underflow".to_string()))?;
-        let b_final = s + d.checked_mul(A_PRECISION)
+        let b_final = s.checked_add(d.checked_mul(A_PRECISION)
             .ok_or_else(|| ArbRsError::CalculationError("y b mul overflow".to_string()))?
             .checked_div(ann)
-            .ok_or_else(|| ArbRsError::CalculationError("y b div underflow".to_string()))?;
+            .ok_or_else(|| ArbRsError::CalculationError("y b div underflow".to_string()))?)
+            .ok_or_else(|| ArbRsError::CalculationError("y b add overflow".to_string()))?;
         (b_final, c_final)
     };
-    
-    println!("[get_y] b: {}, c: {}", b, c);
 
     _get_y_loop(c, b, d)
 }
