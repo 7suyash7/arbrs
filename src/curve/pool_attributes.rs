@@ -21,7 +21,7 @@ pub enum CalculationStrategy {
 /// for a Curve Stableswap pool. This separates the pool's configuration
 /// from its dynamic state (like balances).
 #[derive(Debug)]
-pub struct PoolAttributes<> {
+pub struct PoolAttributes {
     pub pool_variant: PoolVariant,
     pub strategy: CalculationStrategy,
     pub swap_strategy: SwapStrategyType,

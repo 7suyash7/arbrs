@@ -46,6 +46,7 @@ pub trait LiquidityPool<P: Provider + Send + Sync + 'static + ?Sized>: Debug + S
         token_in: &Token<P>,
         token_out: &Token<P>,
         amount_out: U256,
+        block_number: Option<u64>,
     ) -> Result<U256, ArbRsError>;
 
     /// Calculates the "absolute exchange rate" of token1 in terms of token0, without decimal scaling.

@@ -1,4 +1,4 @@
-use crate::curve::pool::{CurveStableswapPool};
+use crate::curve::pool::CurveStableswapPool;
 use crate::curve::registry::CurveRegistry;
 use crate::errors::ArbRsError;
 use crate::manager::token_manager::TokenManager;
@@ -10,7 +10,7 @@ use alloy_sol_types::{SolEvent, sol};
 use dashmap::DashMap;
 use std::sync::Arc;
 
-// Mainnet Curve Registry Address from degenbot
+/// Mainnet Curve Registry Address
 const CURVE_MAINNET_REGISTRY: Address = address!("90E00ACe148ca3b23Ac1bC8C240C2a7Dd9c2d7f5");
 
 sol! {

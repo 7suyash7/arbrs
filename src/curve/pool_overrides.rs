@@ -1,4 +1,4 @@
-use alloy_primitives::{address, Address};
+use alloy_primitives::{Address, address};
 use once_cell::sync::Lazy;
 use std::collections::HashSet;
 

@@ -626,6 +626,7 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> LiquidityPool<P> for UniswapV
         token_in: &Token<P>,
         token_out: &Token<P>,
         amount_out: U256,
+        _block_number: Option<u64>,
     ) -> Result<U256, ArbRsError> {
         self.validate_token_pair(token_in, token_out)?;
         let zero_for_one = token_out.address() == self.token1.address();

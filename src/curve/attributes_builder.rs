@@ -1,16 +1,16 @@
+use crate::TokenLike;
 use crate::core::token::Token;
 use crate::curve::pool_attributes::{
-  CalculationStrategy, PoolAttributes, PoolVariant, SwapStrategyType,
+    CalculationStrategy, PoolAttributes, PoolVariant, SwapStrategyType,
 };
 use crate::curve::pool_overrides::{self, DVariant};
 use crate::curve::registry::CurveRegistry;
 use crate::errors::ArbRsError;
 use crate::manager::token_manager::TokenManager;
-use crate::TokenLike;
-use alloy_primitives::{address, Address, U256};
+use alloy_primitives::{Address, U256, address};
 use alloy_provider::Provider;
 use alloy_rpc_types::TransactionRequest;
-use alloy_sol_types::{sol, SolCall};
+use alloy_sol_types::{SolCall, sol};
 use std::sync::Arc;
 
 sol! {
@@ -30,7 +30,8 @@ const BUSD_YEARN_POOL: Address = address!("45F783CCE6B7FF23B2ab2D70e416cdb7D6055
 const SUSD_POOL: Address = address!("A5407eAE9Ba41422680e2e00537571bcC53efBfD");
 const RAI_METAPOOL: Address = address!("59Ab5a5b5d617E478a2479B0cAD80DA7e2831492");
 const T_METAPOOL: Address = address!("BfAb6FA95E0091ed66058ad493189D2cB29385E6");
-const STETH_POOL: Address = address!("EB16Ae0052ed37f479f7fe63849198Df1765a733");
+const STETH_POOL: Address = address!("DC24316b9AE028F1497c275EB9192a3Ea0f67022");
+const SAAVE_POOL: Address = address!("EB16Ae0052ed37f479f7fe63849198Df1765a733");
 
 const LENDING_POOLS: &[Address] = &[
     COMPOUND_POOL,
@@ -38,7 +39,6 @@ const LENDING_POOLS: &[Address] = &[
     GUSD_METAPOOL,
     YEARN_POOL,
     BUSD_YEARN_POOL,
-    STETH_POOL,
     address!("A5407eAE9Ba41422680e2e00537571bcC53efBfD"), // sUSD
     address!("2dded6Da1BF5DBdF597C45fcFaa3194e53EcfeAF"), // LUSD/3CRV
     address!("A5407eAE9Ba41422680e2e00537571bcC53efBfD"), // sUSD
@@ -60,10 +60,7 @@ const UNSCALED_POOLS: &[Address] = &[
     address!("FB9a265b5a1f52d97838Ec7274A0b1442efAcC87"),
 ];
 
-const DYNAMIC_FEE_POOLS: &[Address] = &[
-    // STETH_POOL, 
-    MIM_METAPOOL
-];
+const DYNAMIC_FEE_POOLS: &[Address] = &[STETH_POOL, SAAVE_POOL];
 
 const ADMIN_FEE_POOLS: &[Address] = &[
     address!("4e0915C88bC70750D68C481540F081fEFaF22273"),
@@ -73,10 +70,7 @@ const ADMIN_FEE_POOLS: &[Address] = &[
     address!("3Fb78e61784C9c637D560eDE23Ad57CA1294c14a"),
 ];
 
-const ORACLE_POOLS: &[Address] = &[
-    RAI_METAPOOL,
-    T_METAPOOL,
-];
+const ORACLE_POOLS: &[Address] = &[RAI_METAPOOL, T_METAPOOL];
 
 pub async fn build_attributes<P: Provider + Send + Sync + 'static + ?Sized>(
     address: Address,
@@ -102,7 +96,11 @@ pub async fn build_attributes<P: Provider + Send + Sync + 'static + ?Sized>(
     let swap_strategy = determine_swap_strategy(address, is_metapool);
 
     let mut attributes = PoolAttributes {
-        pool_variant: if is_metapool { PoolVariant::Meta } else { PoolVariant::Plain },
+        pool_variant: if is_metapool {
+            PoolVariant::Meta
+        } else {
+            PoolVariant::Plain
+        },
         strategy: CalculationStrategy::Legacy,
         d_variant: pool_overrides::get_d_variant(&address),
         y_variant: pool_overrides::get_y_variant(&address),
@@ -123,11 +121,26 @@ pub async fn build_attributes<P: Provider + Send + Sync + 'static + ?Sized>(
         attributes.d_variant = DVariant::Legacy;
     }
 
-    println!("[Attributes Builder] Applying specific overrides for {}", address);
+    println!(
+        "[Attributes Builder] Applying specific overrides for {}",
+        address
+    );
     if UNSCALED_POOLS.contains(&address) || ADMIN_FEE_POOLS.contains(&address) {
         attributes.d_variant = DVariant::Legacy;
     }
     match address {
+        SAAVE_POOL => {
+            let call = offpeg_fee_multiplierCall {};
+            let res_bytes = provider
+                .call(
+                    TransactionRequest::default()
+                        .to(address)
+                        .input(call.abi_encode().into()),
+                )
+                .await?;
+            attributes.offpeg_fee_multiplier =
+                Some(offpeg_fee_multiplierCall::abi_decode_returns(&res_bytes)?);
+        }
         COMPOUND_POOL => {
             attributes.pool_variant = PoolVariant::Lending;
             attributes.use_lending = vec![true, true];
@@ -140,7 +153,8 @@ pub async fn build_attributes<P: Provider + Send + Sync + 'static + ?Sized>(
             attributes.out_fee = Some(U256::from(40_000_000));
         }
         DUSD_METAPOOL => {
-            attributes.precision_multipliers = vec![U256::from(1), U256::from(1_000_000_000_000u128)];
+            attributes.precision_multipliers =
+                vec![U256::from(1), U256::from(1_000_000_000_000u128)];
         }
         AAVE_POOL => {
             attributes.pool_variant = PoolVariant::Lending;
@@ -162,8 +176,15 @@ pub async fn build_attributes<P: Provider + Send + Sync + 'static + ?Sized>(
                 U256::from(10).pow(U256::from(12)),
             ];
             let call = offpeg_fee_multiplierCall {};
-            let res_bytes = provider.call(TransactionRequest::default().to(address).input(call.abi_encode().into())).await?;
-            attributes.offpeg_fee_multiplier = Some(offpeg_fee_multiplierCall::abi_decode_returns(&res_bytes)?);
+            let res_bytes = provider
+                .call(
+                    TransactionRequest::default()
+                        .to(address)
+                        .input(call.abi_encode().into()),
+                )
+                .await?;
+            attributes.offpeg_fee_multiplier =
+                Some(offpeg_fee_multiplierCall::abi_decode_returns(&res_bytes)?);
         }
         LUSD_METAPOOL => {
             attributes.precision_multipliers = vec![
@@ -179,7 +200,7 @@ pub async fn build_attributes<P: Provider + Send + Sync + 'static + ?Sized>(
                 U256::from(1),
                 U256::from(10).pow(U256::from(12)),
                 U256::from(10).pow(U256::from(12)),
-                U256::from(1)
+                U256::from(1),
             ];
         }
         SUSD_POOL => {
@@ -187,16 +208,19 @@ pub async fn build_attributes<P: Provider + Send + Sync + 'static + ?Sized>(
         }
         RAI_METAPOOL | T_METAPOOL => {
             let call = price_oracleCall {};
-            if provider.call(TransactionRequest::default().to(address).input(call.abi_encode().into())).await.is_ok() {
+            if provider
+                .call(
+                    TransactionRequest::default()
+                        .to(address)
+                        .input(call.abi_encode().into()),
+                )
+                .await
+                .is_ok()
+            {
                 attributes.oracle_method = Some(1);
             } else {
                 attributes.oracle_method = Some(0);
             };
-        }
-        STETH_POOL => {
-            let call = offpeg_fee_multiplierCall {};
-            let res_bytes = provider.call(TransactionRequest::default().to(address).input(call.abi_encode().into())).await?;
-            attributes.offpeg_fee_multiplier = Some(offpeg_fee_multiplierCall::abi_decode_returns(&res_bytes)?);
         }
         _ => {
             println!("[Attributes Builder] No specific overrides for this pool.");

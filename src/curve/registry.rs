@@ -69,22 +69,25 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> CurveRegistry<P> {
         &self,
         metapool_address: Address,
     ) -> Result<Option<Address>, ArbRsError> {
-        // A metapool's second coin (index 1) is the LP token of its base pool.
-        println!("[get_base_pool] Checking for base pool for {}", metapool_address);
+        println!(
+            "[get_base_pool] Checking for base pool for {}",
+            metapool_address
+        );
         let get_coin_call = ICurvePool::coinsCall { i: U256::from(1) };
         let request = TransactionRequest::default()
             .to(metapool_address)
             .input(get_coin_call.abi_encode().into());
-        
+
         let base_lp_token = match self.provider.call(request).await {
             Ok(bytes) => ICurvePool::coinsCall::abi_decode_returns(&bytes)?,
-            // If coins(1) reverts, it's not a metapool (or only has one coin).
             Err(e) => {
-                println!("[get_base_pool] Call to coins(1) failed: {}. Assuming not a metapool.", e);
-                return Ok(None)
-            }, 
+                println!(
+                    "[get_base_pool] Call to coins(1) failed: {}. Assuming not a metapool.",
+                    e
+                );
+                return Ok(None);
+            }
         };
-        println!("[get_base_pool] Found potential LP token: {}", base_lp_token);
 
         if base_lp_token.is_zero() {
             return Ok(None);
@@ -101,18 +104,14 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> CurveRegistry<P> {
             Ok(result_bytes) => {
                 let base_pool_address =
                     ICurveRegistry::get_pool_from_lp_tokenCall::abi_decode_returns(&result_bytes)?;
-                
+
                 if base_pool_address.is_zero() {
-                    Ok(None) // Registry returned address(0), not a metapool.
+                    Ok(None)
                 } else {
                     Ok(Some(base_pool_address))
                 }
             }
-            Err(_) => {
-                // A revert here means the token is not a known LP token.
-                // This is the expected behavior for a non-metapool.
-                Ok(None)
-            }
+            Err(_) => Ok(None),
         }
     }
 }

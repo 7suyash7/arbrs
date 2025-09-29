@@ -617,6 +617,7 @@ impl<P: Provider + Send + Sync + ?Sized + 'static, S: V2CalculationStrategy + 's
         token_in: &Token<P>,
         token_out: &Token<P>,
         amount_out: U256,
+        _block_number: Option<u64>,
     ) -> Result<U256, ArbRsError> {
         self.validate_token_pair(token_in, token_out)?;
         let current_state = self.state.read().await;
@@ -743,6 +744,7 @@ impl<P: Provider + Send + Sync + ?Sized + 'static> LiquidityPool<P>
         _token_in: &Token<P>,
         _token_out: &Token<P>,
         _amount_out: U256,
+        _block_number: Option<u64>,
     ) -> Result<U256, ArbRsError> {
         Err(ArbRsError::CalculationError(
             "Cannot calculate input for unregistered pool".into(),
