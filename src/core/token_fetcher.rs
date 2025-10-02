@@ -31,7 +31,16 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> TokenFetcher<P> {
             self.fetch_name(address)
         );
 
-        let decimals = decimals_res?;
+        let decimals = match decimals_res {
+            Ok(d) => d,
+            Err(_) => {
+                return Err(ArbRsError::TokenStandardError(
+                    address,
+                    "Failed to fetch decimals".to_string(),
+                ))
+            }
+        };
+
         let symbol =
             symbol_res.unwrap_or_else(|| format!("UNKNOWN@{}", address_to_short_string(address)));
         let name = name_res.unwrap_or_else(|| "Unknown Token".to_string());
@@ -52,11 +61,11 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> TokenFetcher<P> {
             input: Some(Bytes::from(call.abi_encode())).into(),
             ..Default::default()
         };
-        match self.provider.call(request).await {
-            Ok(result_bytes) => Ok(decimalsCall::abi_decode_returns(&result_bytes)
-                .map_err(|e| ArbRsError::AbiDecodeError(e.to_string()))?),
-            Err(e) => Err(ArbRsError::ProviderError(e.to_string())),
-        }
+        
+        let result_bytes = self.provider.call(request).await.map_err(|e| ArbRsError::ProviderError(e.to_string()))?;
+        
+        decimalsCall::abi_decode_returns(&result_bytes)
+            .map_err(|e| ArbRsError::AbiDecodeError(e.to_string()))
     }
 
     /// Fetches symbol using a multi-step fallback process.
@@ -136,7 +145,6 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> TokenFetcher<P> {
     }
 }
 
-// Helper fns
 fn bytes32_to_string(bytes: &B256) -> String {
     let first_null = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     String::from_utf8_lossy(&bytes[..first_null]).to_string()

@@ -8,6 +8,8 @@ use alloy_provider::Provider;
 use alloy_rpc_types::{Filter, Log};
 use alloy_sol_types::{SolEvent, sol};
 use dashmap::DashMap;
+use futures::stream::{self, StreamExt};
+use tokio::sync::Mutex;
 use std::sync::Arc;
 
 /// Mainnet Curve Registry Address
@@ -58,46 +60,63 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> CurvePoolManager<P> {
             return Ok(Vec::new());
         }
 
-        let from_block = self.last_discovery_block + 1;
-        println!(
-            "[CurvePoolManager] Discovering pools from {} to {}",
-            from_block, end_block
-        );
+        const CHUNK_SIZE: u64 = 10000;
+        let mut from_block = self.last_discovery_block + 1;
+        let mut all_new_pools = Vec::new();
 
-        let event_filter = Filter::new()
-            .address(self.curve_registry.address)
-            .event_signature(PoolAdded::SIGNATURE_HASH)
-            .from_block(from_block)
-            .to_block(end_block);
+        while from_block <= end_block {
+            let to_block = (from_block + CHUNK_SIZE - 1).min(end_block);
+            println!("[Curve Manager] Discovering pools from {} to {}", from_block, to_block);
 
-        let logs: Vec<Log> = self
-            .provider
-            .get_logs(&event_filter)
-            .await
-            .map_err(|e| ArbRsError::ProviderError(e.to_string()))?;
+            let event_filter = Filter::new()
+                .address(self.curve_registry.address)
+                .event_signature(PoolAdded::SIGNATURE_HASH)
+                .from_block(from_block)
+                .to_block(to_block);
 
-        println!(
-            "[CurvePoolManager] Discovered {} new pools via events.",
-            logs.len()
-        );
+            let logs: Vec<Log> = self.provider.get_logs(&event_filter).await?;
+            
+            const CONCURRENT_BUILDS: usize = 5;
+            let new_pools_in_chunk = Arc::new(Mutex::new(Vec::new()));
 
-        let mut new_pools = Vec::new();
-        for log in logs {
-            match PoolAdded::decode_log(&log.inner) {
-                Ok(decoded_log) => {
-                    let pool_address = decoded_log.pool;
-                    if let Ok(pool) = self.build_pool(pool_address).await {
-                        new_pools.push(pool);
+            let token_manager_clone = self.token_manager.clone();
+            let provider_clone = self.provider.clone();
+            let pool_registry_clone = self.pool_registry.clone();
+            let curve_registry_clone = self.curve_registry.clone();
+
+            stream::iter(logs)
+                .for_each_concurrent(CONCURRENT_BUILDS, |log| {
+                    let token_manager = token_manager_clone.clone();
+                    let provider = provider_clone.clone();
+                    let pool_registry = pool_registry_clone.clone();
+                    let curve_registry = curve_registry_clone.clone();
+                    let new_pools = new_pools_in_chunk.clone();
+                    
+                    async move {
+                        if let Ok(decoded_log) = PoolAdded::decode_log_data(&log.inner.data) {
+                           if let Ok(pool) = build_and_register_curve_pool(
+                                pool_registry,
+                                token_manager,
+                                provider,
+                                &curve_registry,
+                                decoded_log.pool,
+                            ).await {
+                                let mut new_pools_guard = new_pools.lock().await;
+                                new_pools_guard.push(pool);
+                            }
+                        }
                     }
-                }
-                Err(e) => {
-                    eprintln!("[CurvePoolManager] FAILED to decode PoolAdded log: {:?}", e);
-                }
-            }
+                })
+                .await;
+            
+            let new_pools = Arc::try_unwrap(new_pools_in_chunk).unwrap().into_inner();
+            all_new_pools.extend(new_pools);
+            
+            from_block = to_block + 1;
         }
 
         self.last_discovery_block = end_block;
-        Ok(new_pools)
+        Ok(all_new_pools)
     }
 
     /// Creates a new CurveStableswapPool instance and adds it to the registry.
@@ -132,4 +151,35 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> CurvePoolManager<P> {
     pub fn get_pool_by_address(&self, address: Address) -> Option<Arc<dyn LiquidityPool<P>>> {
         self.pool_registry.get(&address).map(|pool| pool.clone())
     }
+
+    pub fn get_all_pools(&self) -> Vec<Arc<dyn LiquidityPool<P>>> {
+        self.pool_registry
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect()
+    }
+}
+
+async fn build_and_register_curve_pool<P: Provider + Send + Sync + 'static + ?Sized>(
+    pool_registry: Arc<PoolRegistry<P>>,
+    token_manager: Arc<TokenManager<P>>,
+    provider: Arc<P>,
+    curve_registry: &CurveRegistry<P>,
+    pool_address: Address,
+) -> Result<Arc<dyn LiquidityPool<P>>, ArbRsError> {
+    if let Some(pool) = pool_registry.get(&pool_address) {
+        return Ok(pool.clone());
+    }
+
+    let pool = Arc::new(
+        CurveStableswapPool::new(
+            pool_address,
+            provider,
+            token_manager,
+            curve_registry,
+        ).await?,
+    );
+
+    pool_registry.insert(pool_address, pool.clone());
+    Ok(pool)
 }

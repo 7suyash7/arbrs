@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::fmt::{Debug, Formatter, Result as FmtResult};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::hash::{Hash, Hasher};
 use tokio::sync::Mutex;
 
 sol!(
@@ -42,7 +43,6 @@ pub trait TokenLike: Send + Sync {
     async fn get_total_supply(&self, block_number: Option<u64>) -> Result<U256, ArbRsError>;
 }
 
-// Native Token impl
 pub struct NativeTokenData<P: ?Sized> {
     pub chain_id: u64,
     pub symbol: String,
@@ -132,7 +132,6 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> TokenLike for NativeTokenData
     }
 }
 
-// ERC20 Token impl
 pub struct Erc20Data<P: ?Sized> {
     pub address: Address,
     pub symbol: String,
@@ -355,7 +354,6 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> TokenLike for Erc20Data<P> {
     }
 }
 
-// Wrapper Enum
 #[derive(Clone)]
 pub enum Token<P: ?Sized> {
     Erc20(Arc<Erc20Data<P>>),
@@ -435,6 +433,12 @@ impl<P: Provider + Send + Sync + ?Sized + 'static> Ord for Token<P> {
 impl<P: Provider + Send + Sync + ?Sized + 'static> PartialEq<Address> for Token<P> {
     fn eq(&self, other: &Address) -> bool {
         self.address() == *other
+    }
+}
+
+impl<P: Provider + Send + Sync + ?Sized + 'static> Hash for Token<P> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.address().hash(state);
     }
 }
 

@@ -5,6 +5,8 @@ pub mod errors;
 pub mod manager;
 pub mod math;
 pub mod pool;
+pub mod arbitrage;
+pub mod db;
 
 pub use errors::ArbRsError;
 

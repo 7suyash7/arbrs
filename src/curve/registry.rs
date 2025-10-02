@@ -19,7 +19,6 @@ sol! {
     }
 }
 
-#[derive(Clone)]
 pub struct CurveRegistry<P: Provider + Send + Sync + 'static + ?Sized> {
     pub address: Address,
     provider: Arc<P>,
@@ -112,6 +111,15 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> CurveRegistry<P> {
                 }
             }
             Err(_) => Ok(None),
+        }
+    }
+}
+
+impl<P: Provider + Send + Sync + 'static + ?Sized> Clone for CurveRegistry<P> {
+    fn clone(&self) -> Self {
+        Self {
+            address: self.address,
+            provider: self.provider.clone(),
         }
     }
 }

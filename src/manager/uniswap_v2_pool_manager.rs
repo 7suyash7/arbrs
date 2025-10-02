@@ -6,6 +6,8 @@ use crate::pool::LiquidityPool;
 use alloy_primitives::Address;
 use alloy_provider::Provider;
 use dashmap::DashMap;
+use futures::{stream, StreamExt};
+use tokio::sync::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -42,57 +44,65 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> UniswapV2PoolManager<P> {
         &mut self,
         end_block: u64,
     ) -> Result<Vec<Arc<dyn LiquidityPool<P>>>, ArbRsError> {
-        println!(
-            "[discover_pools_in_range] Current last_discovery_block: {}",
-            self.last_discovery_block
-        );
         if end_block <= self.last_discovery_block {
-            println!(
-                "[discover_pools_in_range] No new blocks to scan. end_block: {}, last_discovery_block: {}",
-                end_block, self.last_discovery_block
-            );
             return Ok(Vec::new());
         }
 
-        let from_block = self.last_discovery_block + 1;
-        println!(
-            "[discover_pools_in_range] Discovering pools from {} to {}",
-            from_block, end_block
-        );
+        const CHUNK_SIZE: u64 = 10000;
+        let mut from_block = self.last_discovery_block + 1;
+        let mut all_new_pools = Vec::new();
 
-        let discovered_pools_data = discover_new_v2_pools(
-            self.provider.clone(),
-            self.factory_address,
-            from_block,
-            end_block,
-        )
-        .await?;
+        while from_block <= end_block {
+            let to_block = (from_block + CHUNK_SIZE - 1).min(end_block);
+            println!("[V2 Manager] Discovering pools from block {} to {}", from_block, to_block);
 
-        println!(
-            "[discover_pools_in_range] Discovered {} new pools.",
-            discovered_pools_data.len()
-        );
+            let discovered_pools_data = discover_new_v2_pools(
+                self.provider.clone(),
+                self.factory_address,
+                from_block,
+                to_block,
+            ).await?;
 
-        let mut new_pools = Vec::new();
+            const CONCURRENT_BUILDS: usize = 5;
+            
+            let new_pools_in_chunk = Arc::new(Mutex::new(Vec::new()));
 
-        for pool_data in discovered_pools_data {
-            println!(
-                "[discover_pools_in_range] Building pool at address: {}",
-                pool_data.pool_address
-            );
-            let pool = self
-                .build_v2_pool(
-                    pool_data.pool_address,
-                    pool_data.token0,
-                    pool_data.token1,
-                    DexVariant::UniswapV2,
-                )
-                .await?;
-            new_pools.push(pool);
+            let token_manager_clone = self.token_manager.clone();
+            let provider_clone = self.provider.clone();
+            let pool_registry_clone = self.pool_registry.clone();
+
+            stream::iter(discovered_pools_data)
+                .for_each_concurrent(CONCURRENT_BUILDS, |pool_data| {
+                    let token_manager = token_manager_clone.clone();
+                    let provider = provider_clone.clone();
+                    let pool_registry = pool_registry_clone.clone();
+                    let new_pools = new_pools_in_chunk.clone();
+                    
+                    async move {
+                        if let Ok(pool) = build_and_register_v2_pool(
+                            pool_registry,
+                            token_manager,
+                            provider,
+                            pool_data.pool_address,
+                            pool_data.token0,
+                            pool_data.token1,
+                            DexVariant::UniswapV2,
+                        ).await {
+                            let mut new_pools_guard = new_pools.lock().await;
+                            new_pools_guard.push(pool);
+                        }
+                    }
+                })
+                .await;
+            
+            let new_pools = Arc::try_unwrap(new_pools_in_chunk).unwrap().into_inner();
+            all_new_pools.extend(new_pools);
+            
+            from_block = to_block + 1;
         }
 
         self.last_discovery_block = end_block;
-        Ok(new_pools)
+        Ok(all_new_pools)
     }
 
     /// Discovers new pools from the last discovered block up to the latest block.
@@ -157,4 +167,44 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> UniswapV2PoolManager<P> {
     pub fn get_pool_by_address(&self, address: Address) -> Option<Arc<dyn LiquidityPool<P>>> {
         self.pool_registry.get(&address).map(|pool| pool.clone())
     }
+
+    pub fn get_all_pools(&self) -> Vec<Arc<dyn LiquidityPool<P>>> {
+        self.pool_registry
+            .iter()
+            .map(|entry| entry.value().clone())
+            .collect()
+    }
+}
+
+async fn build_and_register_v2_pool<P: Provider + Send + Sync + 'static + ?Sized>(
+    pool_registry: Arc<PoolRegistry<P>>,
+    token_manager: Arc<TokenManager<P>>,
+    provider: Arc<P>,
+    pool_address: Address,
+    token_a: Address,
+    token_b: Address,
+    dex_type: DexVariant,
+) -> Result<Arc<dyn LiquidityPool<P>>, ArbRsError> {
+    if let Some(pool) = pool_registry.get(&pool_address) {
+        return Ok(pool.clone());
+    }
+
+    let token0 = token_manager.get_token(if token_a < token_b { token_a } else { token_b }).await?;
+    let token1 = token_manager.get_token(if token_a < token_b { token_b } else { token_a }).await?;
+
+    let pool: Arc<dyn LiquidityPool<P>> = match dex_type {
+        DexVariant::UniswapV2 | DexVariant::SushiSwap => {
+            Arc::new(crate::pool::uniswap_v2::UniswapV2Pool::new(
+                pool_address, token0, token1, provider, crate::pool::strategy::StandardV2Logic,
+            ))
+        }
+        DexVariant::PancakeSwapV2 => {
+            Arc::new(crate::pool::uniswap_v2::UniswapV2Pool::new(
+                pool_address, token0, token1, provider, crate::pool::strategy::PancakeV2Logic,
+            ))
+        }
+    };
+
+    pool_registry.insert(pool_address, pool.clone());
+    Ok(pool)
 }
