@@ -1,9 +1,10 @@
 use crate::core::token::Token;
 use crate::errors::ArbRsError;
-use crate::pool::LiquidityPool;
-use alloy_primitives::U256;
+use crate::pool::{LiquidityPool, PoolSnapshot};
+use alloy_primitives::{Address, U256};
 use alloy_provider::Provider;
-use async_trait::async_trait;
+use std::any::Any;
+use std::collections::HashMap;
 use std::fmt::{self, Debug};
 use std::sync::Arc;
 
@@ -11,26 +12,39 @@ use std::sync::Arc;
 /// and tokens to be traded.
 #[derive(Clone)]
 pub struct ArbitragePath<P: Provider + Send + Sync + 'static + ?Sized> {
-    /// The sequence of liquidity pools to trade through.
     pub pools: Vec<Arc<dyn LiquidityPool<P>>>,
-    /// The sequence of tokens to trade. The first and last token should be the same.
     pub path: Vec<Arc<Token<P>>>,
-    /// The token that will be used to measure profit.
     pub profit_token: Arc<Token<P>>,
 }
 
 /// A trait representing a generic arbitrage strategy.
-#[async_trait]
+/// The core calculation methods are synchronous and operate on pre-fetched snapshots.
 pub trait Arbitrage<P: Provider + Send + Sync + 'static + ?Sized>: Debug + Send + Sync {
-    /// Calculates the potential profit for a given starting amount.
-    ///
-    /// Returns a tuple of `(profit, amount_out)`, where `profit` is the net gain
-    /// and `amount_out` is the total amount of the profit token returned at the end.
-    async fn calculate_profit(
+    /// Returns the addresses of all pools involved in the path.
+    fn get_involved_pools(&self) -> Vec<Address>;
+
+    /// Returns the pool objects involved in the path.
+    fn get_pools(&self) -> &Vec<Arc<dyn LiquidityPool<P>>>;
+
+    /// Calculates the final amount out. PURE & SYNCHRONOUS.
+    fn calculate_out_amount(
         &self,
         start_amount: U256,
-        block_number: Option<u64>,
-    ) -> Result<(U256, U256), ArbRsError>;
+        snapshots: &HashMap<Address, PoolSnapshot>,
+    ) -> Result<U256, ArbRsError>;
+
+    /// Quickly checks if a path is potentially profitable. PURE & SYNCHRONOUS.
+    fn check_viability(&self, snapshots: &HashMap<Address, PoolSnapshot>) -> Result<bool, ArbRsError>;
+
+    /// Allows for downcasting the trait object to its concrete type.
+    fn as_any(&self) -> &dyn Any;
+}
+
+#[derive(Debug)]
+pub struct ProfitableOpportunity<P: Provider + Send + Sync + 'static + ?Sized> {
+    pub path: Arc<dyn Arbitrage<P>>,
+    pub optimal_input: U256,
+    pub gross_profit: U256,
 }
 
 impl<P: Provider + Send + Sync + 'static + ?Sized> Debug for ArbitragePath<P> {

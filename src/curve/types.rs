@@ -36,3 +36,25 @@ pub struct CurveStableSwapPoolAttributes {
 pub struct CurveStableSwapPoolStateUpdated {
     pub state: CurveStableswapPoolState,
 }
+
+#[derive(Clone, Debug, Default)]
+pub struct CurvePoolSnapshot {
+    pub balances: Vec<U256>,
+    pub a: U256,
+    pub fee: U256,
+    pub block_timestamp: u64,
+    pub base_pool_virtual_price: Option<U256>,
+    pub base_pool_lp_total_supply: Option<U256>,
+    
+    // Data for complex strategies
+    pub rates: Vec<U256>, 
+    pub admin_balances: Option<Vec<U256>>,
+    
+    // Tricrypto-specific data
+    pub tricrypto_d: Option<U256>,
+    pub tricrypto_gamma: Option<U256>,
+    pub tricrypto_price_scale: Option<Vec<U256>>,
+
+    // Metapool-specific data
+    pub scaled_redemption_price: Option<U256>,
+}

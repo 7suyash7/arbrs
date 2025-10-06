@@ -1,5 +1,8 @@
 use crate::core::token::Token;
+use crate::curve::types::CurvePoolSnapshot;
 use crate::errors::ArbRsError;
+use crate::pool::uniswap_v2::UniswapV2PoolState;
+use crate::pool::uniswap_v3::UniswapV3PoolSnapshot;
 use alloy_primitives::{Address, U256};
 use alloy_provider::Provider;
 use async_trait::async_trait;
@@ -20,6 +23,13 @@ pub struct UniswapPoolSwapVector<P: Provider + Send + Sync + 'static + ?Sized> {
     pub zero_for_one: bool,
 }
 
+#[derive(Debug, Clone)]
+pub enum PoolSnapshot {
+    UniswapV2(UniswapV2PoolState),
+    UniswapV3(UniswapV3PoolSnapshot),
+    Curve(CurvePoolSnapshot),
+}
+
 #[async_trait]
 pub trait LiquidityPool<P: Provider + Send + Sync + 'static + ?Sized>: Debug + Send + Sync {
     /// Returns the pool's contract address.
@@ -28,45 +38,43 @@ pub trait LiquidityPool<P: Provider + Send + Sync + 'static + ?Sized>: Debug + S
     /// Returns a vector of all tokens in the pool.
     fn get_all_tokens(&self) -> Vec<Arc<Token<P>>>;
 
-    /// Fetches the latest state from the blockchain.
+    /// Fetches the latest state from the blockchain and updates the pool's internal cache.
     async fn update_state(&self) -> Result<(), ArbRsError>;
 
-    /// Calculates the output amount for a given input and output token.
-    async fn calculate_tokens_out(
+    /// Fetches all dynamic data for a pool at a specific block and returns a snapshot.
+    async fn get_snapshot(&self, block_number: Option<u64>) -> Result<PoolSnapshot, ArbRsError>;
+
+    /// Calculates tokens out using a pre-fetched state snapshot. PURE & SYNCHRONOUS.
+    fn calculate_tokens_out(
         &self,
         token_in: &Token<P>,
         token_out: &Token<P>,
         amount_in: U256,
-        block_number: Option<u64>,
+        snapshot: &PoolSnapshot,
     ) -> Result<U256, ArbRsError>;
 
-    /// Calculates the required input amount for a given input and output token.
-    async fn calculate_tokens_in_from_tokens_out(
+    /// Calculates tokens in from a pre-fetched state snapshot. PURE & SYNCHRONOUS.
+    fn calculate_tokens_in(
         &self,
         token_in: &Token<P>,
         token_out: &Token<P>,
         amount_out: U256,
-        block_number: Option<u64>,
+        snapshot: &PoolSnapshot,
     ) -> Result<U256, ArbRsError>;
 
-    /// Calculates the "absolute exchange rate" of token1 in terms of token0, without decimal scaling.
-    /// Rate b_to_a = reserve_a / reserve_b
-    async fn nominal_price(
-        &self,
-        token_in: &Token<P>,
-        token_out: &Token<P>,
-    ) -> Result<f64, ArbRsError>;
-
     /// Calculates the "absolute price" of token0 in terms of token1, without decimal scaling.
-    /// Price a_to_b = reserve_b / reserve_a
     async fn absolute_price(
         &self,
         token_in: &Token<P>,
         token_out: &Token<P>,
     ) -> Result<f64, ArbRsError>;
-
-    /// Calculates the "absolute exchange rate" of token1 in terms of token0, without decimal scaling.
-    /// Rate b_to_a = reserve_a / reserve_b
+    
+    async fn nominal_price(
+        &self,
+        token_in: &Token<P>,
+        token_out: &Token<P>,
+    ) -> Result<f64, ArbRsError>;
+        
     async fn absolute_exchange_rate(
         &self,
         token_in: &Token<P>,

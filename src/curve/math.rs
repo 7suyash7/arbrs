@@ -237,7 +237,7 @@ pub(super) fn calc_d_alpha(
 /// `y = (y^2 + c) / (2y + b - d)`
 fn _get_y_loop(c: U256, b: U256, d: U256) -> Result<U256, ArbRsError> {
     let mut y = d;
-    for i in 0..255 {
+    for _i in 0..255 {
         let y_prev = y;
         let numerator = y.pow(U256::from(2)) + c;
         let denominator = (y
@@ -252,8 +252,6 @@ fn _get_y_loop(c: U256, b: U256, d: U256) -> Result<U256, ArbRsError> {
             ));
         }
         y = numerator / denominator;
-
-        println!("[_get_y_loop] iter {}: y_prev={}, y_new={}", i, y_prev, y);
 
         if y > y_prev {
             if y - y_prev <= U256::from(1) {
@@ -298,7 +296,6 @@ pub fn get_d(
             DVariant::Group1 | DVariant::Group3 => calc_dp_alpha(d, xp, n_coins)?,
             DVariant::Group2 => calc_dp_beta(d, xp, n_coins)?,
             DVariant::Group4 => calc_dp_gamma(d, xp, n_coins)?,
-            // DVariant::LegacyPlusOne => calc_dp_default_plus_one(d, xp, n_coins)?,
             _ => calc_dp_default(d, xp, n_coins)?,
         };
 

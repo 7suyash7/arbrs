@@ -1,58 +1,121 @@
-use crate::arbitrage::types::{Arbitrage, ArbitragePath};
-use crate::errors::ArbRsError;
-use alloy_primitives::U256;
+use crate::{
+    arbitrage::types::{Arbitrage, ArbitragePath}, core::token::TokenLike, curve::{constants::FEE_DENOMINATOR, pool::CurveStableswapPool, pool_attributes::SwapStrategyType}, errors::ArbRsError, math::{utils::u256_to_f64, v3::constants::Q96}, pool::{uniswap_v3::UniswapV3Pool, LiquidityPool, PoolSnapshot}
+};
+use alloy_primitives::{Address, U256};
 use alloy_provider::Provider;
-use async_trait::async_trait;
-use std::fmt::{self, Debug};
-use std::sync::Arc;
+use std::{
+    any::Any,
+    collections::HashMap,
+    fmt::{self, Debug, Formatter},
+    sync::Arc,
+};
 
-/// Represents a simple two-pool arbitrage cycle (e.g., WETH -> USDC -> WETH).
+/// Represents a simple arbitrage cycle through one or more pools. (e.g., WETH -> USDC -> WETH).
 #[derive(Clone)]
-pub struct TwoPoolCycle<P: Provider + Send + Sync + 'static + ?Sized> {
+pub struct ArbitrageCycle<P: Provider + Send + Sync + 'static + ?Sized> {
     pub path: Arc<ArbitragePath<P>>,
 }
 
-impl<P: Provider + Send + Sync + 'static + ?Sized> TwoPoolCycle<P> {
+impl<P: Provider + Send + Sync + 'static + ?Sized> ArbitrageCycle<P> {
     pub fn new(path: ArbitragePath<P>) -> Self {
-        Self {
-            path: Arc::new(path),
-        }
+        Self { path: Arc::new(path) }
     }
 }
 
-#[async_trait]
-impl<P: Provider + Send + Sync + 'static + ?Sized> Arbitrage<P> for TwoPoolCycle<P> {
-    async fn calculate_profit(
+impl<P: Provider + Send + Sync + 'static + ?Sized> Arbitrage<P> for ArbitrageCycle<P> {
+    fn get_involved_pools(&self) -> Vec<Address> {
+        self.path.pools.iter().map(|p| p.address()).collect()
+    }
+
+    fn get_pools(&self) -> &Vec<Arc<dyn LiquidityPool<P>>> {
+        &self.path.pools
+    }
+
+    fn calculate_out_amount(
         &self,
         start_amount: U256,
-        block_number: Option<u64>,
-    ) -> Result<(U256, U256), ArbRsError> {
-        let amount_out_b = self
-            .path
-            .pools[0]
-            .calculate_tokens_out(&self.path.path[0], &self.path.path[1], start_amount, block_number)
-            .await?;
-
-        if amount_out_b.is_zero() {
-            return Ok((U256::ZERO, U256::ZERO));
+        snapshots: &HashMap<Address, PoolSnapshot>,
+    ) -> Result<U256, ArbRsError> {
+        if start_amount.is_zero() {
+            return Ok(U256::ZERO);
         }
+        let mut current_amount = start_amount;
 
-        let final_amount_out = self
-            .path
-            .pools[1]
-            .calculate_tokens_out(&self.path.path[1], &self.path.path[2], amount_out_b, block_number)
-            .await?;
+        for i in 0..self.path.pools.len() {
+            let pool = &self.path.pools[i];
+            let snapshot = snapshots.get(&pool.address()).ok_or(ArbRsError::NoPoolStateAvailable(0))?;
+            
+            let token_in = &self.path.path[i];
+            let token_out = &self.path.path[i + 1];
 
-        let profit = final_amount_out.saturating_sub(start_amount);
+            current_amount = pool.calculate_tokens_out(token_in, token_out, current_amount, snapshot)?;
+            
+            if current_amount.is_zero() {
+                break;
+            }
+        }
+        Ok(current_amount)
+    }
 
-        Ok((profit, final_amount_out))
+    fn check_viability(&self, snapshots: &HashMap<Address, PoolSnapshot>) -> Result<bool, ArbRsError> {
+        let mut profit_factor = 1.0;
+
+        for i in 0..self.path.pools.len() {
+            let pool_arc = &self.path.pools[i];
+            let snapshot = snapshots.get(&pool_arc.address()).ok_or(ArbRsError::NoPoolStateAvailable(0))?;
+            
+            let token_in = &self.path.path[i];
+            let token_out = &self.path.path[i + 1];
+
+            let (price, fee_factor) = match snapshot {
+                PoolSnapshot::UniswapV2(s) => {
+                    if s.reserve0.is_zero() { return Ok(false); }
+                    let (reserve_in, reserve_out) = if *pool_arc.get_all_tokens()[0] == **token_in { (s.reserve0, s.reserve1) } else { (s.reserve1, s.reserve0) };
+                    (u256_to_f64(reserve_out) / u256_to_f64(reserve_in), 0.997)
+                }
+                PoolSnapshot::UniswapV3(s) => {
+                    if s.sqrt_price_x96.is_zero() { return Ok(false); }
+                    let ratio = u256_to_f64(s.sqrt_price_x96) / u256_to_f64(Q96);
+                    let price_of_token0_in_token1 = ratio.powi(2);
+                    let price = if *pool_arc.get_all_tokens()[0] == **token_in { price_of_token0_in_token1 } else { 1.0 / price_of_token0_in_token1 };
+                    
+                    let fee = pool_arc.as_any().downcast_ref::<UniswapV3Pool<P>>().unwrap().fee();
+                    (price, 1.0 - (fee as f64 / 1_000_000.0))
+                }
+                PoolSnapshot::Curve(s) => {
+                    let curve_pool = pool_arc.as_any().downcast_ref::<CurveStableswapPool<P>>().unwrap();
+                    let fee_factor = 1.0 - (u256_to_f64(s.fee) / u256_to_f64(FEE_DENOMINATOR));
+                    
+                    let price = match curve_pool.attributes.swap_strategy {
+                        SwapStrategyType::Default | SwapStrategyType::Metapool | SwapStrategyType::Lending => {
+                            10f64.powi(token_in.decimals() as i32 - token_out.decimals() as i32)
+                        },
+                        _ => {
+                            let i = curve_pool.tokens.iter().position(|t| t == token_in).unwrap();
+                            let j = curve_pool.tokens.iter().position(|t| t == token_out).unwrap();
+                            if s.balances.is_empty() || s.balances[i].is_zero() { return Ok(false); }
+                            let reserve_in = u256_to_f64(s.balances[i]) / 10f64.powi(token_in.decimals() as i32);
+                            let reserve_out = u256_to_f64(s.balances[j]) / 10f64.powi(token_out.decimals() as i32);
+                            reserve_out / reserve_in
+                        }
+                    };
+                    (price, fee_factor)
+                }
+            };
+            
+            profit_factor *= price * fee_factor;
+        }
+        
+        Ok(profit_factor > 1.0)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 
-impl<P: Provider + Send + Sync + 'static + ?Sized> Debug for TwoPoolCycle<P> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TwoPoolCycle")
-            .field("path", &self.path)
-            .finish()
+impl<P: Provider + Send + Sync + 'static + ?Sized> Debug for ArbitrageCycle<P> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ArbitrageCycle").field("path", &self.path).finish()
     }
 }

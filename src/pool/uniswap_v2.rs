@@ -2,7 +2,7 @@ use crate::core::messaging::{Publisher, PublisherMessage, Subscriber};
 use crate::core::token::{Token, TokenLike};
 use crate::errors::ArbRsError;
 use crate::math::v3::full_math;
-use crate::pool::LiquidityPool;
+use crate::pool::{LiquidityPool, PoolSnapshot};
 use crate::pool::strategy::V2CalculationStrategy;
 use crate::pool::uniswap_v2_simulation::UniswapV2PoolSimulationResult;
 use alloy_primitives::{Address, B256, Bytes, I256, TxKind, U256, keccak256};
@@ -27,6 +27,12 @@ pub struct UniswapV2PoolState {
     pub reserve0: U256,
     pub reserve1: U256,
     pub block_number: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct UniswapV2PoolSnapshot {
+    pub reserve0: U256,
+    pub reserve1: U256,
 }
 
 pub struct UniswapV2Pool<P: ?Sized, S: V2CalculationStrategy> {
@@ -55,7 +61,7 @@ impl<P: Provider + Send + Sync + 'static + ?Sized, S: V2CalculationStrategy + 's
             if let Some(sub) = weak_sub.upgrade() {
                 sub.id() != subscriber_id
             } else {
-                false // remove dead weak pointers
+                false
             }
         });
     }
@@ -594,40 +600,48 @@ impl<P: Provider + Send + Sync + ?Sized + 'static, S: V2CalculationStrategy + 's
         Ok(())
     }
 
-    async fn calculate_tokens_out(
+    fn calculate_tokens_out(
         &self,
         token_in: &Token<P>,
         token_out: &Token<P>,
         amount_in: U256,
-        _block_number: Option<u64>,
+        snapshot: &PoolSnapshot,
     ) -> Result<U256, ArbRsError> {
         self.validate_token_pair(token_in, token_out)?;
-        let current_state = self.state.read().await;
-        let (reserve_in, reserve_out) = if token_in.address() == self.token0.address() {
-            (current_state.reserve0, current_state.reserve1)
-        } else {
-            (current_state.reserve1, current_state.reserve0)
+        let v2_snapshot = match snapshot {
+            PoolSnapshot::UniswapV2(s) => s,
+            _ => return Err(ArbRsError::CalculationError("Invalid snapshot for V2 pool".into())),
         };
-        self.strategy
-            .calculate_tokens_out(reserve_in, reserve_out, amount_in)
+
+        let (reserve_in, reserve_out) = if token_in.address() == self.token0.address() {
+            (v2_snapshot.reserve0, v2_snapshot.reserve1)
+        } else {
+            (v2_snapshot.reserve1, v2_snapshot.reserve0)
+        };
+
+        self.strategy.calculate_tokens_out(reserve_in, reserve_out, amount_in)
     }
 
-    async fn calculate_tokens_in_from_tokens_out(
+    fn calculate_tokens_in(
         &self,
         token_in: &Token<P>,
         token_out: &Token<P>,
         amount_out: U256,
-        _block_number: Option<u64>,
+        snapshot: &PoolSnapshot,
     ) -> Result<U256, ArbRsError> {
         self.validate_token_pair(token_in, token_out)?;
-        let current_state = self.state.read().await;
-        let (reserve_in, reserve_out) = if token_out.address() == self.token1.address() {
-            (current_state.reserve0, current_state.reserve1)
-        } else {
-            (current_state.reserve1, current_state.reserve0)
+        let v2_snapshot = match snapshot {
+            PoolSnapshot::UniswapV2(s) => s,
+            _ => return Err(ArbRsError::CalculationError("Invalid snapshot for V2 pool".into())),
         };
-        self.strategy
-            .calculate_tokens_in_from_tokens_out(reserve_in, reserve_out, amount_out)
+
+        let (reserve_in, reserve_out) = if token_out.address() == self.token1.address() {
+            (v2_snapshot.reserve0, v2_snapshot.reserve1)
+        } else {
+            (v2_snapshot.reserve1, v2_snapshot.reserve0)
+        };
+
+        self.strategy.calculate_tokens_in_from_tokens_out(reserve_in, reserve_out, amount_out)
     }
 
     async fn absolute_price(
@@ -680,6 +694,27 @@ impl<P: Provider + Send + Sync + ?Sized + 'static, S: V2CalculationStrategy + 's
             Ok(1.0 / price)
         }
     }
+
+    async fn get_snapshot(&self, block_number: Option<u64>) -> Result<PoolSnapshot, ArbRsError> {
+        let call = getReservesCall {};
+        let request = TransactionRequest::default()
+            .to(self.address)
+            .input(call.abi_encode().into());
+
+        let result_bytes = self.provider.call(request)
+            .block(block_number.map(BlockId::from).unwrap_or(BlockId::latest()))
+            .await?;
+            
+        let reserves = getReservesCall::abi_decode_returns(&result_bytes)?;
+
+        let snapshot = UniswapV2PoolState {
+            reserve0: U256::from(reserves.reserve0),
+            reserve1: U256::from(reserves.reserve1),
+            block_number: block_number.unwrap_or(0),
+        };
+
+        Ok(PoolSnapshot::UniswapV2(snapshot))
+    }
 }
 
 impl<P: ?Sized, S: V2CalculationStrategy> Debug for UniswapV2Pool<P, S> {
@@ -727,24 +762,24 @@ impl<P: Provider + Send + Sync + ?Sized + 'static> LiquidityPool<P>
         Ok(())
     }
 
-    async fn calculate_tokens_out(
+    fn calculate_tokens_out(
         &self,
         _token_in: &Token<P>,
         _token_out: &Token<P>,
         _amount_in: U256,
-        _block_number: Option<u64>,
+        _snapshot: &PoolSnapshot,
     ) -> Result<U256, ArbRsError> {
         Err(ArbRsError::CalculationError(
             "Cannot calculate output for unregistered pool".into(),
         ))
     }
 
-    async fn calculate_tokens_in_from_tokens_out(
+    fn calculate_tokens_in(
         &self,
         _token_in: &Token<P>,
         _token_out: &Token<P>,
         _amount_out: U256,
-        _block_number: Option<u64>,
+        _snapshot: &PoolSnapshot,
     ) -> Result<U256, ArbRsError> {
         Err(ArbRsError::CalculationError(
             "Cannot calculate input for unregistered pool".into(),
@@ -776,6 +811,12 @@ impl<P: Provider + Send + Sync + ?Sized + 'static> LiquidityPool<P>
         _token_in: &Token<P>,
         _token_out: &Token<P>,
     ) -> Result<f64, ArbRsError> {
+        Err(ArbRsError::CalculationError(
+            "Cannot get exchange rate for unregistered pool".into(),
+        ))
+    }
+
+    async fn get_snapshot(&self, _block_number: Option<u64>) -> Result<PoolSnapshot, ArbRsError> {
         Err(ArbRsError::CalculationError(
             "Cannot get exchange rate for unregistered pool".into(),
         ))

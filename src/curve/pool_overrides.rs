@@ -1,8 +1,9 @@
 use alloy_primitives::{Address, address};
 use once_cell::sync::Lazy;
 use std::collections::HashSet;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DVariant {
     Default,
     Group0,
@@ -103,7 +104,7 @@ pub fn get_d_variant(pool_address: &Address) -> DVariant {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum YVariant {
     Default,
     Group0,

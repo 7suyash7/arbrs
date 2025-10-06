@@ -1,3 +1,4 @@
+use std::str::FromStr;
 use std::sync::Arc;
 
 use alloy_primitives::Address;
@@ -15,11 +16,19 @@ pub struct PoolRecord {
     pub tokens: Vec<Address>,
     pub fee: Option<u32>,
     pub tick_spacing: Option<i32>,
+    pub attributes_json: Option<String>,
 }
 
 /// Manages all database connections and queries.
 pub struct DbManager {
     pool: SqlitePool,
+}
+
+#[derive(Debug, Clone)]
+pub struct TokenRecord {
+    pub address: Address,
+    pub symbol: String,
+    pub decimals: u8,
 }
 
 impl DbManager {
@@ -90,10 +99,10 @@ impl DbManager {
 
     pub async fn load_all_pools(&self) -> Result<Vec<PoolRecord>, sqlx::Error> {
         let rows = sqlx::query(
-            "SELECT p.address, p.dex, p.fee, p.tick_spacing, GROUP_CONCAT(pt.token_address) as tokens
+            "SELECT p.address, p.dex, p.fee, p.tick_spacing, p.attributes_json, GROUP_CONCAT(pt.token_address) as tokens
              FROM pools p
              JOIN pool_tokens pt ON p.id = pt.pool_id
-             GROUP BY p.id"
+             GROUP BY p.id",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -101,7 +110,8 @@ impl DbManager {
         let mut records = Vec::new();
         for row in rows {
             let token_addresses_str: String = row.get("tokens");
-            let tokens = token_addresses_str.split(',')
+            let tokens = token_addresses_str
+                .split(',')
                 .map(|s| s.parse::<Address>().unwrap())
                 .collect();
 
@@ -111,6 +121,7 @@ impl DbManager {
                 tokens,
                 fee: row.get::<Option<i64>, _>("fee").map(|f| f as u32),
                 tick_spacing: row.get::<Option<i64>, _>("tick_spacing").map(|ts| ts as i32),
+                attributes_json: row.get("attributes_json"), // <-- POPULATE THE NEW FIELD
             });
         }
         Ok(records)
@@ -132,5 +143,36 @@ impl DbManager {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    /// Updates pool attributes in the db
+    pub async fn update_pool_attributes(
+        &self,
+        pool_address: Address,
+        attributes_json: &str,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE pools SET attributes_json = ? WHERE address = ?")
+            .bind(attributes_json)
+            .bind(pool_address.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn get_token_by_address(
+        &self,
+        address: Address,
+    ) -> Result<Option<TokenRecord>, sqlx::Error> {
+        let result: Option<(String, String, i64)> =
+            sqlx::query_as("SELECT address, symbol, decimals FROM tokens WHERE address = ?")
+                .bind(address.to_string())
+                .fetch_optional(&self.pool)
+                .await?;
+
+        Ok(result.map(|(address_str, symbol, decimals)| TokenRecord {
+            address: Address::from_str(&address_str).unwrap(),
+            symbol,
+            decimals: decimals as u8,
+        }))
     }
 }

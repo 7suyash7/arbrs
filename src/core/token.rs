@@ -137,10 +137,10 @@ pub struct Erc20Data<P: ?Sized> {
     pub symbol: String,
     pub name: String,
     pub decimals: u8,
-    provider: Arc<P>,
-    balances: Arc<Mutex<HashMap<Address, Arc<Mutex<LruCache<u64, U256>>>>>>,
-    total_supply_cache: Arc<Mutex<LruCache<u64, U256>>>,
-    allowance_cache:
+    pub provider: Arc<P>,
+    pub balances: Arc<Mutex<HashMap<Address, Arc<Mutex<LruCache<u64, U256>>>>>>,
+    pub total_supply_cache: Arc<Mutex<LruCache<u64, U256>>>,
+    pub allowance_cache:
         Arc<Mutex<HashMap<Address, HashMap<Address, Arc<Mutex<LruCache<u64, U256>>>>>>>,
 }
 

@@ -1,9 +1,9 @@
 use alloy_primitives::{Address, U256, address};
 use alloy_provider::{Provider, ProviderBuilder};
 use arbrs::core::token::TokenLike;
+use arbrs::db::DbManager;
 use arbrs::manager::token_manager::TokenManager;
 use std::sync::Arc;
-use url::Url;
 
 const WETH_ADDRESS: Address = address!("C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2");
 const WBTC_ADDRESS: Address = address!("2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599");
@@ -12,14 +12,15 @@ const ROUTER_ADDRESS: Address = address!("7a250d5630B4cF539739dF2C5dAcb4c659F248
 const ZERO_ADDRESS: Address = address!("0000000000000000000000000000000000000000");
 
 const FORK_RPC_URL: &str = "http://127.0.0.1:8545";
+const DB_URL: &str = "sqlite::memory:";
 
 type DynProvider = dyn Provider + Send + Sync;
 
 async fn setup_manager() -> TokenManager<DynProvider> {
-    let url = Url::parse(FORK_RPC_URL).expect("Failed to parse RPC URL");
-    let provider = ProviderBuilder::new().connect_http(url);
+    let provider = ProviderBuilder::new().connect_http(FORK_RPC_URL.parse().unwrap());
     let provider_arc: Arc<DynProvider> = Arc::new(provider);
-    TokenManager::new(provider_arc, 1)
+    let db_manager = Arc::new(DbManager::new(DB_URL).await.unwrap());
+    TokenManager::new(provider_arc, 1, db_manager)
 }
 
 #[tokio::test]

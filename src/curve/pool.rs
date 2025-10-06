@@ -1,10 +1,12 @@
+use crate::curve::types::CurvePoolSnapshot;
+use crate::math::utils::u256_to_f64;
 use crate::TokenLike;
 use crate::core::token::Token;
 use crate::curve::attributes_builder;
-use crate::curve::constants::{FEE_DENOMINATOR, PRECISION};
+use crate::curve::constants::{BROKEN_POOLS, FEE_DENOMINATOR, PRECISION};
 use crate::curve::math;
 use crate::curve::pool_attributes::{PoolAttributes, SwapStrategyType};
-use crate::curve::pool_overrides;
+use crate::curve::pool_overrides::Y_D_VARIANT_GROUP_0;
 use crate::curve::registry::CurveRegistry;
 use crate::curve::strategies::{
     AdminFeeStrategy, DefaultStrategy, DynamicFeeStrategy, LendingStrategy, MetapoolStrategy,
@@ -12,13 +14,14 @@ use crate::curve::strategies::{
 };
 use crate::errors::ArbRsError;
 use crate::manager::token_manager::TokenManager;
-use crate::pool::LiquidityPool;
+use crate::pool::{LiquidityPool, PoolSnapshot};
 use alloy_primitives::{Address, U256, address};
 use alloy_provider::Provider;
 use alloy_rpc_types::{BlockId, TransactionRequest};
 use alloy_sol_types::{SolCall, sol};
 use async_recursion::async_recursion;
 use async_trait::async_trait;
+use futures::future::join_all;
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -29,6 +32,12 @@ const NATIVE_PLACEHOLDERS: &[Address] = &[
     Address::ZERO,
     address!("eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"),
 ];
+const RETH_ETH_METAPOOL: Address = address!("618788357D0EBd8A37e763ADab3bc575D54c2C7d");
+const COMPOUND_POOL_ADDRESS: Address = address!("A2B47E3D5c44877cca798226B7B8118F9BFb7A56");
+const AAVE_POOL_ADDRESS: Address = address!("52EA46506B9CC5Ef470C5bf89f17Dc28bB35D85C");
+const ANKRETH_POOL: Address = address!("A96A65c051bF88B4095Ee1f2451C2A9d43F53Ae2");
+const IRON_BANK_POOL: Address = address!("2dded6Da1BF5DBdF597C45fcFaa3194e53EcfeAF");
+const RETH_POOL: Address = address!("F9440930043eb3997fc70e1339dBb11F341de7A8");
 
 sol! {
     function A() external view returns (uint256);
@@ -100,236 +109,205 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> LiquidityPool<P> for CurveSta
     }
 
     async fn update_state(&self) -> Result<(), ArbRsError> {
-        let a_call = ACall {};
-        let a_bytes = self
-            .provider
-            .call(
-                TransactionRequest::default()
-                    .to(self.address)
-                    .input(a_call.abi_encode().into()),
-            )
-            .await?;
-        *self.a.write().await = ACall::abi_decode_returns(&a_bytes)?;
+        let (a_res, fee_res, balances_res, vp_res) = tokio::join!(
+            self.provider.call(TransactionRequest::default().to(self.address).input(ACall {}.abi_encode().into())),
+            self.provider.call(TransactionRequest::default().to(self.address).input(feeCall {}.abi_encode().into())),
+            self.fetch_balances(),
+            async {
+                if let Some(base_pool) = &self.base_pool {
+                    let vp_call = get_virtual_priceCall {};
+                    let request = TransactionRequest::default().to(base_pool.address).input(vp_call.abi_encode().into());
+                    Some(self.provider.call(request).await)
+                } else {
+                    None
+                }
+            }
+        );
 
-        let fee_call = feeCall {};
-        let fee_bytes = self
-            .provider
-            .call(
-                TransactionRequest::default()
-                    .to(self.address)
-                    .input(fee_call.abi_encode().into()),
-            )
-            .await?;
-        *self.fee.write().await = feeCall::abi_decode_returns(&fee_bytes)?;
+        *self.a.write().await = ACall::abi_decode_returns(&a_res?)?;
+        *self.fee.write().await = feeCall::abi_decode_returns(&fee_res?)?;
+        
+        let live_balances = balances_res?;
+        let final_balances = if self.attributes.swap_strategy == SwapStrategyType::AdminFee {
+            let admin_balances = self.get_admin_balances().await?;
+            live_balances.iter().zip(admin_balances.iter()).map(|(l, a)| l.saturating_sub(*a)).collect()
+        } else {
+            live_balances
+        };
+        *self.balances.write().await = final_balances;
 
-        let live_balances = self.fetch_balances().await?;
-        *self.balances.write().await = live_balances;
-
-        if let Some(base_pool) = &self.base_pool {
-            let vp_call = get_virtual_priceCall {};
-            let request = TransactionRequest::default()
-                .to(base_pool.address)
-                .input(vp_call.abi_encode().into());
-            let vp_bytes = self.provider.call(request).await?;
-            *self.cached_virtual_price.write().await =
-                Some(get_virtual_priceCall::abi_decode_returns(&vp_bytes)?);
+        if let Some(res) = vp_res {
+            *self.cached_virtual_price.write().await = Some(get_virtual_priceCall::abi_decode_returns(&res?)?);
         }
         Ok(())
     }
 
-    async fn calculate_tokens_out(
+    async fn get_snapshot(&self, block_number: Option<u64>) -> Result<PoolSnapshot, ArbRsError> {
+        let block_num = if let Some(bn) = block_number {
+            bn
+        } else {
+            self.provider.get_block_number().await?
+        };
+
+        let block_header = self.provider.get_block_by_number(block_num.into()).await?
+            .ok_or_else(|| ArbRsError::ProviderError("Block not found".to_string()))?.header;
+
+        let (a_res, fee_res, balances_res, vp_res, rates_res, tricrypto_res, admin_balances_res, scaled_redemption_price_res, base_lp_supply_res) = tokio::join!(
+            self.a_precise(block_header.timestamp),
+            self.provider.call(TransactionRequest::default().to(self.address).input(feeCall {}.abi_encode().into())).block(block_num.into()),
+            async {
+                if self.attributes.swap_strategy == SwapStrategyType::AdminFee {
+                    self.fetch_balances_by_balance_of(Some(block_num)).await
+                } else {
+                    self.fetch_balances_for_block(Some(block_num)).await
+                }
+            },
+            async {
+                if let Some(base_pool) = &self.base_pool {
+                    let request = TransactionRequest::default().to(base_pool.address).input(get_virtual_priceCall {}.abi_encode().into());
+                    Some(self.provider.call(request).block(block_num.into()).await)
+                } else { None }
+            },
+            self.get_rates_for_block(block_num),
+            async {
+                if self.attributes.swap_strategy == SwapStrategyType::Tricrypto {
+                    Some(tokio::join!(
+                        self.get_tricrypto_d(block_num),
+                        self.get_tricrypto_gamma(block_num),
+                        self.get_tricrypto_price_scale(block_num)
+                    ))
+                } else { None }
+            },
+            async {
+                if self.attributes.swap_strategy == SwapStrategyType::AdminFee {
+                    Some(self.get_admin_balances().await)
+                } else { None }
+            },
+            async {
+                if self.address == RETH_ETH_METAPOOL {
+                    Some(self.get_scaled_redemption_price(block_num).await)
+                } else { None }
+            },
+            async {
+                if let Some(base_pool) = &self.base_pool {
+                    Some(base_pool.lp_token.get_total_supply(Some(block_num)).await)
+                } else { None }
+            }
+        );
+
+        let balances = balances_res?;
+        
+        let admin_balances = match admin_balances_res {
+            Some(Ok(bals)) => Some(bals),
+            Some(Err(e)) => return Err(e),
+            None => None,
+        };
+
+        let final_balances = if let Some(admin_bals) = &admin_balances {
+            balances.iter().zip(admin_bals.iter()).map(|(l, a)| l.saturating_sub(*a)).collect()
+        } else {
+            balances
+        };
+
+        let (tricrypto_d, tricrypto_gamma, tricrypto_price_scale) = if let Some(results) = tricrypto_res {
+            (Some(results.0?), Some(results.1?), Some(results.2?))
+        } else { (None, None, None) };
+
+        let scaled_redemption_price = match scaled_redemption_price_res {
+            Some(Ok(price)) => Some(price),
+            Some(Err(e)) => return Err(e),
+            None => None,
+        };
+        
+        let snapshot = CurvePoolSnapshot {
+            balances: final_balances,
+            a: a_res?,
+            fee: feeCall::abi_decode_returns(&fee_res?)?,
+            block_timestamp: block_header.timestamp,
+            base_pool_virtual_price: if let Some(res) = vp_res { Some(get_virtual_priceCall::abi_decode_returns(&res?)?) } else { None },
+            base_pool_lp_total_supply: if let Some(res) = base_lp_supply_res { Some(res?) } else { None },
+            rates: rates_res?,
+            admin_balances,
+            tricrypto_d,
+            tricrypto_gamma,
+            tricrypto_price_scale,
+            scaled_redemption_price,
+        };
+
+        Ok(PoolSnapshot::Curve(snapshot))
+    }
+
+    fn calculate_tokens_out(
         &self,
         token_in: &Token<P>,
         token_out: &Token<P>,
         amount_in: U256,
-        block_number: Option<u64>,
+        snapshot: &PoolSnapshot,
     ) -> Result<U256, ArbRsError> {
-        let is_metapool = self.base_pool.is_some();
-        let is_direct_swap = self
-            .tokens
-            .iter()
-            .any(|t| t.address() == token_in.address())
-            && self
-                .tokens
-                .iter()
-                .any(|t| t.address() == token_out.address());
-
-        if is_metapool && !is_direct_swap {
-            return self
-                .calculate_dy_underlying(token_in, token_out, amount_in, block_number)
-                .await;
-        }
-
-        let i = self
-            .tokens
-            .iter()
-            .position(|t| t.address() == token_in.address())
-            .ok_or_else(|| {
-                ArbRsError::CalculationError("Token In not found in pool".to_string())
-            })?;
-        let j = self
-            .tokens
-            .iter()
-            .position(|t| t.address() == token_out.address())
-            .ok_or_else(|| {
-                ArbRsError::CalculationError("Token Out not found in pool".to_string())
-            })?;
-
-        let block_num = if let Some(bn) = block_number {
-            bn
-        } else {
-            self.provider.get_block_number().await?
+        let curve_snapshot = match snapshot {
+            PoolSnapshot::Curve(s) => s,
+            _ => return Err(ArbRsError::CalculationError("Invalid snapshot type for Curve pool".to_string())),
         };
 
-        let block_header = self
-            .provider
-            .get_block_by_number(block_num.into())
-            .await?
-            .ok_or_else(|| ArbRsError::DataFetchError(Address::ZERO))?;
+        let i = self.tokens.iter().position(|t| **t == *token_in).ok_or_else(|| ArbRsError::CalculationError("Token In not found".to_string()))?;
+        let j = self.tokens.iter().position(|t| **t == *token_out).ok_or_else(|| ArbRsError::CalculationError("Token Out not found".to_string()))?;
 
-        let params = SwapParams {
-            i,
-            j,
-            dx: amount_in,
-            pool: self,
-            block_number: block_num,
-            block_timestamp: block_header.header.timestamp,
-        };
+        let params = SwapParams { i, j, dx: amount_in, pool: self, snapshot: curve_snapshot };
 
         match self.attributes.swap_strategy {
-            SwapStrategyType::Default => DefaultStrategy::default().calculate_dy(&params).await,
-            SwapStrategyType::Metapool => MetapoolStrategy::default().calculate_dy(&params).await,
-            SwapStrategyType::Lending => LendingStrategy::default().calculate_dy(&params).await,
-            SwapStrategyType::Unscaled => UnscaledStrategy::default().calculate_dy(&params).await,
-            SwapStrategyType::DynamicFee => {
-                DynamicFeeStrategy::default().calculate_dy(&params).await
-            }
-            SwapStrategyType::Tricrypto => TricryptoStrategy::default().calculate_dy(&params).await,
-            SwapStrategyType::Oracle => OracleStrategy::default().calculate_dy(&params).await,
-            SwapStrategyType::AdminFee => AdminFeeStrategy::default().calculate_dy(&params).await,
+            SwapStrategyType::Default => DefaultStrategy::default().calculate_dy(&params),
+            SwapStrategyType::Metapool => MetapoolStrategy::default().calculate_dy(&params),
+            SwapStrategyType::Lending => LendingStrategy::default().calculate_dy(&params),
+            SwapStrategyType::Unscaled => UnscaledStrategy::default().calculate_dy(&params),
+            SwapStrategyType::DynamicFee => DynamicFeeStrategy::default().calculate_dy(&params),
+            SwapStrategyType::Tricrypto => TricryptoStrategy::default().calculate_dy(&params),
+            SwapStrategyType::Oracle => OracleStrategy::default().calculate_dy(&params),
+            SwapStrategyType::AdminFee => AdminFeeStrategy::default().calculate_dy(&params),
         }
     }
 
-    async fn calculate_tokens_in_from_tokens_out(
+    fn calculate_tokens_in(
         &self,
         token_in: &Token<P>,
         token_out: &Token<P>,
         amount_out: U256,
-        block_number: Option<u64>,
+        snapshot: &PoolSnapshot,
     ) -> Result<U256, ArbRsError> {
-        let is_metapool = self.base_pool.is_some();
-        let is_direct_swap = self
-            .tokens
-            .iter()
-            .any(|t| t.address() == token_in.address())
-            && self
-                .tokens
-                .iter()
-                .any(|t| t.address() == token_out.address());
-
-        if is_metapool && !is_direct_swap {
-            unimplemented!("Underlying dx calculations not yet implemented");
-        }
-
-        let i = self
-            .tokens
-            .iter()
-            .position(|t| t.address() == token_in.address())
-            .ok_or_else(|| {
-                ArbRsError::CalculationError("Token In not found in pool".to_string())
-            })?;
-        let j = self
-            .tokens
-            .iter()
-            .position(|t| t.address() == token_out.address())
-            .ok_or_else(|| {
-                ArbRsError::CalculationError("Token Out not found in pool".to_string())
-            })?;
-
-        let block_num = if let Some(bn) = block_number {
-            bn
-        } else {
-            self.provider.get_block_number().await?
+        let curve_snapshot = match snapshot {
+            PoolSnapshot::Curve(s) => s,
+            _ => return Err(ArbRsError::CalculationError("Invalid snapshot type for Curve pool".to_string())),
         };
 
-        let block = self
-            .provider
-            .get_block_by_number(block_num.into())
-            .await?
-            .ok_or_else(|| ArbRsError::DataFetchError(Address::ZERO))?;
+        let i = self.tokens.iter().position(|t| **t == *token_in).ok_or_else(|| ArbRsError::CalculationError("Token In not found".to_string()))?;
+        let j = self.tokens.iter().position(|t| **t == *token_out).ok_or_else(|| ArbRsError::CalculationError("Token Out not found".to_string()))?;
 
-        let params = SwapParams {
-            i,
-            j,
-            dx: U256::ZERO,
-            pool: self,
-            block_number: block_num,
-            block_timestamp: block.header.timestamp,
-        };
-
+        let params = SwapParams { i, j, dx: U256::ZERO, pool: self, snapshot: curve_snapshot };
+        
         match self.attributes.swap_strategy {
-            SwapStrategyType::Default => {
-                DefaultStrategy::default()
-                    .calculate_dx(&params, amount_out)
-                    .await
-            }
-            SwapStrategyType::Metapool => {
-                MetapoolStrategy::default()
-                    .calculate_dx(&params, amount_out)
-                    .await
-            }
-            SwapStrategyType::Lending => {
-                LendingStrategy::default()
-                    .calculate_dx(&params, amount_out)
-                    .await
-            }
-            SwapStrategyType::Unscaled => {
-                UnscaledStrategy::default()
-                    .calculate_dx(&params, amount_out)
-                    .await
-            }
-            SwapStrategyType::DynamicFee => {
-                DynamicFeeStrategy::default()
-                    .calculate_dx(&params, amount_out)
-                    .await
-            }
-            SwapStrategyType::Tricrypto => {
-                TricryptoStrategy::default()
-                    .calculate_dx(&params, amount_out)
-                    .await
-            }
-            SwapStrategyType::Oracle => {
-                OracleStrategy::default()
-                    .calculate_dx(&params, amount_out)
-                    .await
-            }
-            SwapStrategyType::AdminFee => {
-                AdminFeeStrategy::default()
-                    .calculate_dx(&params, amount_out)
-                    .await
-            }
+            _ => DefaultStrategy::default().calculate_dx(&params, amount_out),
         }
     }
-    async fn nominal_price(
-        &self,
-        _token_in: &Token<P>,
-        _token_out: &Token<P>,
-    ) -> Result<f64, ArbRsError> {
-        unimplemented!()
+
+    async fn nominal_price(&self, token_in: &Token<P>, token_out: &Token<P>) -> Result<f64, ArbRsError> {
+        let price = self.absolute_price(token_in, token_out).await?;
+        let scale_factor = 10f64.powi(token_in.decimals() as i32 - token_out.decimals() as i32);
+        Ok(price * scale_factor)
     }
-    async fn absolute_price(
-        &self,
-        _token_in: &Token<P>,
-        _token_out: &Token<P>,
-    ) -> Result<f64, ArbRsError> {
-        unimplemented!()
+
+    async fn absolute_price(&self, token_in: &Token<P>, token_out: &Token<P>) -> Result<f64, ArbRsError> {
+        let snapshot = self.get_snapshot(None).await?;
+        let amount_in = U256::from(1000);
+        let amount_out = self.calculate_tokens_out(token_in, token_out, amount_in, &snapshot)?;
+
+        if amount_in.is_zero() || amount_out.is_zero() {
+            return Err(ArbRsError::CalculationError("Cannot calculate price: input reserve is zero".to_string()));
+        }
+
+        Ok(u256_to_f64(amount_out) / u256_to_f64(amount_in))
     }
-    async fn absolute_exchange_rate(
-        &self,
-        _token_in: &Token<P>,
-        _token_out: &Token<P>,
-    ) -> Result<f64, ArbRsError> {
-        unimplemented!()
+
+    async fn absolute_exchange_rate(&self, token_in: &Token<P>, token_out: &Token<P>) -> Result<f64, ArbRsError> {
+        self.absolute_price(token_in, token_out).await
     }
 }
 
@@ -340,27 +318,35 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> CurveStableswapPool<P> {
         provider: Arc<P>,
         token_manager: Arc<TokenManager<P>>,
         registry: &CurveRegistry<P>,
+        attributes: PoolAttributes,
     ) -> Result<Self, ArbRsError> {
+        if BROKEN_POOLS.contains(&address) {
+            return Err(ArbRsError::BrokenPool);
+        }
+
         let tokens = Self::fetch_coins(&address, provider.clone(), &token_manager).await?;
         let lp_token = token_manager
             .get_token(registry.get_lp_token(address).await?)
             .await?;
-        let attributes = attributes_builder::build_attributes(
-            address,
-            &tokens,
-            provider.clone(),
-            &token_manager,
-            registry,
-        )
-        .await?;
+
 
         let mut base_pool = None;
         if let Some(base_pool_address) = attributes.base_pool_address {
+            let base_pool_tokens = Self::fetch_coins(&base_pool_address, provider.clone(), &token_manager).await?;
+            let base_pool_attributes = attributes_builder::build_attributes(
+                base_pool_address, 
+                &base_pool_tokens, 
+                provider.clone(), 
+                &token_manager, 
+                registry
+            ).await?;
+
             let bp_instance = Self::new(
                 base_pool_address,
                 provider.clone(),
                 token_manager.clone(),
                 registry,
+                base_pool_attributes,
             )
             .await?;
             base_pool = Some(Arc::new(bp_instance));
@@ -463,6 +449,10 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> CurveStableswapPool<P> {
             return Err(ArbRsError::DataFetchError(*address));
         }
         Ok(tokens)
+    }
+
+    pub async fn get_fee(&self) -> Result<U256, ArbRsError> {
+        Ok(*self.fee.read().await)
     }
 
     async fn fetch_a_ramping_state(
@@ -631,8 +621,67 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> CurveStableswapPool<P> {
         Ok(balances)
     }
 
+    pub async fn fetch_balances_for_block(
+        &self,
+        block_number: Option<u64>,
+    ) -> Result<Vec<U256>, ArbRsError> {
+        tracing::debug!(
+            pool_address = ?self.address,
+            block = ?block_number.unwrap_or(0),
+            "Fetching Curve balances"
+        );
+        let block_id = block_number.map(BlockId::from).unwrap_or(BlockId::latest());
+
+        let mut use_int128 = true;
+        let test_call_int = coins_1Call { i: 0 };
+        if self.provider
+            .call(
+                TransactionRequest::default()
+                    .to(self.address)
+                    .input(test_call_int.abi_encode().into()),
+            )
+            .block(block_id)
+            .await
+            .is_err()
+        {
+            use_int128 = false;
+        }
+
+        let mut balances = Vec::with_capacity(self.attributes.n_coins);
+        for i in 0..self.attributes.n_coins {
+            let result_bytes = if use_int128 {
+                let call = balances_1Call { i: i as i128 };
+                self.provider
+                    .call(
+                        TransactionRequest::default()
+                            .to(self.address)
+                            .input(call.abi_encode().into()),
+                    )
+                    .block(block_id)
+                    .await?
+            } else {
+                let call = balances_0Call { i: U256::from(i) };
+                self.provider
+                    .call(
+                        TransactionRequest::default()
+                            .to(self.address)
+                            .input(call.abi_encode().into()),
+                    )
+                    .block(block_id)
+                    .await?
+            };
+            let balance = if use_int128 {
+                balances_1Call::abi_decode_returns(&result_bytes)?
+            } else {
+                balances_0Call::abi_decode_returns(&result_bytes)?
+            };
+
+            balances.push(balance);
+        }
+        Ok(balances)
+    }
+
     /// Calculates the precise A value, handling the ramping logic if applicable.
-    /// This is equivalent to `A_precise()` in the Vyper contract.
     pub async fn a_precise(&self, timestamp: u64) -> Result<U256, ArbRsError> {
         if let Some(ramping) = self.a_ramping_state {
             let t1 = ramping.future_a_time;
@@ -691,253 +740,116 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> CurveStableswapPool<P> {
     ///
     /// This calculation accounts for slippage but does not include fees. It's primarily
     /// used to provide a `min_mint_amount` to prevent front-running attacks.
-    pub async fn calc_token_amount(
+    pub fn calc_token_amount_from_snapshot(
         &self,
         amounts: &[U256],
         is_deposit: bool,
-        block_number: Option<u64>,
+        snapshot: &CurvePoolSnapshot,
+        lp_total_supply: U256,
     ) -> Result<U256, ArbRsError> {
-        let block_num = if let Some(bn) = block_number {
-            bn
-        } else {
-            self.provider.get_block_number().await?
-        };
-        let block = self
-            .provider
-            .get_block_by_number(block_num.into())
-            .await?
-            .ok_or_else(|| ArbRsError::DataFetchError(Address::ZERO))?;
-        let amp = self.a_precise(block.header.timestamp).await?;
+        let xp0 = math::xp(&snapshot.rates, &snapshot.balances)?;
+        let d0 = math::get_d(&xp0, snapshot.a, self.attributes.n_coins, self.attributes.d_variant)?;
+        if d0.is_zero() { return Ok(U256::ZERO); }
 
-        let balances = self.balances.read().await;
-        let attributes = &self.attributes;
-
-        let xp0 = math::xp(&self.attributes.rates, &balances)?;
-        let d0 = math::get_d(&xp0, amp, attributes.n_coins, attributes.d_variant)?;
-
-        if d0.is_zero() {
-            return Ok(U256::ZERO);
-        }
-
-        let mut balances1 = balances.clone();
+        let mut balances1 = snapshot.balances.clone();
         for i in 0..self.attributes.n_coins {
             if is_deposit {
                 balances1[i] = balances1[i].saturating_add(amounts[i]);
             } else {
-                balances1[i] =
-                    balances1[i]
-                        .checked_sub(amounts[i])
-                        .ok_or(ArbRsError::CalculationError(
-                            "Withdrawal amount exceeds balance".to_string(),
-                        ))?;
+                balances1[i] = balances1[i].checked_sub(amounts[i]).ok_or(ArbRsError::CalculationError("Withdrawal > balance".into()))?;
             }
         }
 
-        let xp1 = math::xp(&self.attributes.rates, &balances1)?;
-        let d1 = math::get_d(&xp1, amp, attributes.n_coins, attributes.d_variant)?;
+        let xp1 = math::xp(&snapshot.rates, &balances1)?;
+        let d1 = math::get_d(&xp1, snapshot.a, self.attributes.n_coins, self.attributes.d_variant)?;
 
-        let total_supply = self.lp_token.get_total_supply(None).await?;
-
-        let diff = if is_deposit {
-            d1.saturating_sub(d0)
-        } else {
-            d0.saturating_sub(d1)
-        };
-
-        let lp_amount = diff
-            .checked_mul(total_supply)
-            .ok_or(ArbRsError::CalculationError(
-                "LP amount mul overflow".to_string(),
-            ))?
-            .checked_div(d0)
-            .ok_or(ArbRsError::CalculationError(
-                "LP amount div by zero".to_string(),
-            ))?;
-
-        Ok(lp_amount)
+        let diff = if is_deposit { d1.saturating_sub(d0) } else { d0.saturating_sub(d1) };
+        Ok((diff * lp_total_supply).checked_div(d0).ok_or(ArbRsError::CalculationError("LP amount div zero".into()))?)
     }
 
     /// Calculates the amount of a single token received upon withdrawing a
     /// specified amount of LP tokens.
-    pub async fn calc_withdraw_one_coin(
+    pub fn calc_withdraw_one_coin_from_snapshot(
         &self,
         token_amount: U256,
         i: usize,
-        block_number: Option<u64>,
-    ) -> Result<(U256, U256, U256), ArbRsError> {
-        let block_num = if let Some(bn) = block_number {
-            bn
-        } else {
-            self.provider.get_block_number().await?
+        snapshot: &PoolSnapshot,
+        lp_total_supply: U256,
+    ) -> Result<(U256, U256), ArbRsError> {
+        let curve_snapshot = match snapshot {
+            PoolSnapshot::Curve(s) => s,
+            _ => return Err(ArbRsError::CalculationError("Invalid snapshot type".into())),
         };
-        let block = self
-            .provider
-            .get_block_by_number(block_num.into())
-            .await?
-            .ok_or(ArbRsError::DataFetchError(Address::ZERO))?;
-        let amp = self.a_precise(block.header.timestamp).await?;
 
-        let total_supply = self.lp_token.get_total_supply(None).await?;
-        if total_supply.is_zero() {
-            return Err(ArbRsError::CalculationError(
-                "LP token supply is zero".to_string(),
-            ));
-        }
+        if lp_total_supply.is_zero() { return Err(ArbRsError::CalculationError("LP token supply is zero".into())); }
 
-        let balances = self.balances.read().await;
-        let attributes = &self.attributes;
-        let fee = *self.fee.read().await;
-        let n_coins = self.attributes.n_coins;
-        let precisions = &self.attributes.precision_multipliers;
+        let xp = math::xp(&curve_snapshot.rates, &curve_snapshot.balances)?;
+        let d0 = math::get_d(&xp, curve_snapshot.a, self.attributes.n_coins, self.attributes.d_variant)?;
+        let d1 = d0.saturating_sub((token_amount * d0).checked_div(lp_total_supply).unwrap_or(U256::ZERO));
+        
+        let yd_variant = Y_D_VARIANT_GROUP_0.contains(&self.address);
+        let new_y = math::get_y_d(curve_snapshot.a, i, &xp, d1, self.attributes.n_coins, yd_variant)?;
+        let dy_0 = xp[i].saturating_sub(new_y).checked_div(self.attributes.precision_multipliers[i]).unwrap_or(U256::ZERO);
 
-        let xp = math::xp(&self.attributes.rates, &balances)?;
-        let d0 = math::get_d(&xp, amp, n_coins, attributes.d_variant)?;
+        let mut xp_reduced = xp;
+        let fee_rate = (curve_snapshot.fee * U256::from(self.attributes.n_coins)) / U256::from(4 * (self.attributes.n_coins - 1));
 
-        let d1 = d0.saturating_sub(
-            token_amount
-                .checked_mul(d0)
-                .ok_or(ArbRsError::CalculationError("d1 mul overflow".to_string()))?
-                .checked_div(total_supply)
-                .unwrap_or(U256::ZERO),
-        );
-
-        let yd_variant = pool_overrides::Y_D_VARIANT_GROUP_0.contains(&self.address);
-        let new_y = math::get_y_d(amp, i, &xp, d1, n_coins, yd_variant)?;
-        let dy_0 = xp[i]
-            .saturating_sub(new_y)
-            .checked_div(precisions[i])
-            .unwrap_or(U256::ZERO);
-
-        let mut xp_reduced = xp.clone();
-        let fee_rate = fee
-            .checked_mul(U256::from(n_coins))
-            .ok_or(ArbRsError::CalculationError(
-                "fee_rate mul overflow".to_string(),
-            ))?
-            .checked_div(U256::from(4 * (n_coins - 1)))
-            .unwrap_or(U256::ZERO);
-
-        for j in 0..n_coins {
-            let ideal_balance = xp[j]
-                .checked_mul(d1)
-                .ok_or(ArbRsError::CalculationError(
-                    "ideal_balance mul overflow".to_string(),
-                ))?
-                .checked_div(d0)
-                .unwrap_or(U256::ZERO);
-
-            let difference = if j == i {
-                ideal_balance.saturating_sub(new_y)
-            } else {
-                xp[j].saturating_sub(ideal_balance)
-            };
-
-            let fee_amount = fee_rate
-                .checked_mul(difference)
-                .ok_or(ArbRsError::CalculationError(
-                    "fee_amount mul overflow".to_string(),
-                ))?
-                .checked_div(FEE_DENOMINATOR)
-                .unwrap_or(U256::ZERO);
-
+        for j in 0..self.attributes.n_coins {
+            let ideal_balance = (xp_reduced[j] * d1).checked_div(d0).unwrap_or(U256::ZERO);
+            let difference = if j == i { ideal_balance.saturating_sub(new_y) } else { xp_reduced[j].saturating_sub(ideal_balance) };
+            let fee_amount = (fee_rate * difference).checked_div(FEE_DENOMINATOR).unwrap_or(U256::ZERO);
             xp_reduced[j] = xp_reduced[j].saturating_sub(fee_amount);
         }
 
-        let y_after_fee = math::get_y_d(amp, i, &xp_reduced, d1, n_coins, yd_variant)?;
-        let dy = xp_reduced[i]
-            .saturating_sub(y_after_fee)
-            .saturating_sub(U256::from(1))
-            .checked_div(precisions[i])
-            .unwrap_or(U256::ZERO);
-
+        let y_after_fee = math::get_y_d(curve_snapshot.a, i, &xp_reduced, d1, self.attributes.n_coins, yd_variant)?;
+        let dy = xp_reduced[i].saturating_sub(y_after_fee).saturating_sub(U256::from(1)).checked_div(self.attributes.precision_multipliers[i]).unwrap_or(U256::ZERO);
         let final_fee = dy_0.saturating_sub(dy);
 
-        Ok((dy, final_fee, total_supply))
+        Ok((dy, final_fee))
     }
 
     /// Calculates the output amount for a swap between the underlying tokens of a metapool.
     /// This function orchestrates calls to the metapool and its base pool to simulate the full swap path.
-    pub async fn calculate_dy_underlying(
+    pub fn calculate_dy_underlying_from_snapshot(
         &self,
         token_in: &Token<P>,
         token_out: &Token<P>,
         dx: U256,
-        block_number: Option<u64>,
+        self_snapshot: &CurvePoolSnapshot,
+        base_snapshot: &PoolSnapshot,
     ) -> Result<U256, ArbRsError> {
-        let base_pool = self.base_pool.as_ref().ok_or_else(|| {
-            ArbRsError::CalculationError(
-                "This is not a metapool; cannot do an underlying swap.".to_string(),
-            )
-        })?;
-
-        let underlying_tokens = &self.underlying_tokens;
-        let i = underlying_tokens
-            .iter()
-            .position(|t| t.address() == token_in.address())
-            .ok_or_else(|| {
-                ArbRsError::CalculationError("Underlying token In not found".to_string())
-            })?;
-        let j = underlying_tokens
-            .iter()
-            .position(|t| t.address() == token_out.address())
-            .ok_or_else(|| {
-                ArbRsError::CalculationError("Underlying token Out not found".to_string())
-            })?;
+        let base_pool = self.base_pool.as_ref().ok_or_else(|| ArbRsError::CalculationError("Not a metapool".to_string()))?;
+        let i = self.underlying_tokens.iter().position(|t| **t == *token_in).ok_or_else(|| ArbRsError::CalculationError("Underlying In not found".to_string()))?;
+        let j = self.underlying_tokens.iter().position(|t| **t == *token_out).ok_or_else(|| ArbRsError::CalculationError("Underlying Out not found".to_string()))?;
 
         if i > 0 && j > 0 {
-            println!("[Underlying Swap] Path: Underlying -> Underlying");
-            let base_i = i - 1;
-            let base_j = j - 1;
-            let base_token_in = &base_pool.tokens[base_i];
-            let base_token_out = &base_pool.tokens[base_j];
-
-            base_pool
-                .calculate_tokens_out(base_token_in, base_token_out, dx, block_number)
-                .await
+            base_pool.calculate_tokens_out(&base_pool.tokens[i - 1], &base_pool.tokens[j - 1], dx, base_snapshot)
         } else if i > 0 && j == 0 {
-            println!("[Underlying Swap] Path: Underlying -> Meta");
+            let base_curve_snapshot = match base_snapshot {
+                PoolSnapshot::Curve(s) => s,
+                _ => return Err(ArbRsError::CalculationError("Expected Curve snapshot for base pool".into())),
+            };
+            let base_pool_lp_supply = self_snapshot.base_pool_lp_total_supply.ok_or_else(|| ArbRsError::CalculationError("Missing base pool LP supply".into()))?;
 
-            let base_i = i - 1;
             let mut amounts = vec![U256::ZERO; base_pool.attributes.n_coins];
-            amounts[base_i] = dx;
+            amounts[i - 1] = dx;
+            let mut lp_token_amount = base_pool.calc_token_amount_from_snapshot(&amounts, true, base_curve_snapshot, base_pool_lp_supply)?;
 
-            let mut lp_token_amount = base_pool
-                .calc_token_amount(&amounts, true, block_number)
-                .await?;
-
-            let base_pool_fee = *base_pool.fee.read().await;
-            let fee_amount = lp_token_amount
-                .checked_mul(base_pool_fee)
-                .ok_or_else(|| ArbRsError::CalculationError("fee_amount mul overflow".to_string()))?
+            let fee_amount = (lp_token_amount * base_curve_snapshot.fee)
                 .checked_div(FEE_DENOMINATOR * U256::from(2))
-                .ok_or_else(|| {
-                    ArbRsError::CalculationError("fee_amount div underflow".to_string())
-                })?;
+                .ok_or_else(|| ArbRsError::CalculationError("Underlying->Meta fee calc failed".into()))?;
             lp_token_amount = lp_token_amount.saturating_sub(fee_amount);
-
+            
             let lp_token = base_pool.lp_token.as_ref();
-            let meta_asset_out = token_out;
-
-            self.calculate_tokens_out(lp_token, meta_asset_out, lp_token_amount, block_number)
-                .await
+            self.calculate_tokens_out(lp_token, token_out, lp_token_amount, &PoolSnapshot::Curve(self_snapshot.clone()))
         } else if i == 0 && j > 0 {
-            println!("[Underlying Swap] Path: Meta -> Underlying");
-            let meta_asset_in = token_in;
             let lp_token = base_pool.lp_token.as_ref();
-
-            let lp_token_amount = self
-                .calculate_tokens_out(meta_asset_in, lp_token, dx, block_number)
-                .await?;
-
-            let base_j = j - 1;
-            let (dy, _fee, _supply) = base_pool
-                .calc_withdraw_one_coin(lp_token_amount, base_j, block_number)
-                .await?;
+            let lp_token_amount = self.calculate_tokens_out(token_in, lp_token, dx, &PoolSnapshot::Curve(self_snapshot.clone()))?;
+            let base_lp_supply = self_snapshot.base_pool_lp_total_supply.ok_or_else(|| ArbRsError::CalculationError("Missing base pool LP supply".into()))?;
+            let (dy, _fee) = base_pool.calc_withdraw_one_coin_from_snapshot(lp_token_amount, j - 1, base_snapshot, base_lp_supply)?;
             Ok(dy)
         } else {
-            Err(ArbRsError::CalculationError(
-                "Cannot swap a token for itself.".to_string(),
-            ))
+            Err(ArbRsError::CalculationError("Cannot swap a token for itself.".to_string()))
         }
     }
 
@@ -1043,14 +955,18 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> CurveStableswapPool<P> {
         Ok(admin_balances)
     }
 
-    pub async fn fetch_balances_by_balance_of(&self) -> Result<Vec<U256>, ArbRsError> {
-        let mut balances = Vec::with_capacity(self.attributes.n_coins);
-        for token in self.tokens.iter() {
-            let balance = token.get_balance(self.address, None).await?;
-            balances.push(balance);
-            println!("fetch_balances_by_balance_of: {}", balance);
-        }
-        Ok(balances)
+    pub async fn fetch_balances_by_balance_of(
+        &self,
+        block_number: Option<u64>,
+    ) -> Result<Vec<U256>, ArbRsError> {
+        let balance_futs = self
+            .tokens
+            .iter()
+            .map(|token| token.get_balance(self.address, block_number));
+
+        let results: Vec<Result<U256, ArbRsError>> = join_all(balance_futs).await;
+
+        results.into_iter().collect()
     }
 
     pub async fn get_tricrypto_d(&self, block_number: u64) -> Result<U256, ArbRsError> {
@@ -1198,6 +1114,61 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> CurveStableswapPool<P> {
             .await
             .insert(block_number, rates.clone());
         Ok(rates)
+    }
+
+    async fn get_rates_for_block(&self, block_number: u64) -> Result<Vec<U256>, ArbRsError> {
+        let block_id = BlockId::from(block_number);
+
+        match self.attributes.swap_strategy {
+            SwapStrategyType::Lending => {
+                if self.address == ANKRETH_POOL {
+                    let ankr_token = &self.tokens[1];
+                    let rate_bytes = self.provider.call(TransactionRequest::default().to(ankr_token.address()).input(ratioCall {}.abi_encode().into())).block(block_id).await?;
+                    let ratio = ratioCall::abi_decode_returns(&rate_bytes)?;
+                    let ankr_rate = (PRECISION * PRECISION) / ratio;
+                    return Ok(vec![PRECISION, ankr_rate]);
+                }
+                if self.address == RETH_POOL {
+                    let reth_token = &self.tokens[1];
+                    let rate_bytes = self.provider.call(TransactionRequest::default().to(reth_token.address()).input(getExchangeRateCall {}.abi_encode().into())).block(block_id).await?;
+                    let reth_rate = getExchangeRateCall::abi_decode_returns(&rate_bytes)?;
+                    return Ok(vec![PRECISION, reth_rate]);
+                }
+                let rate_futs = self.tokens.iter().enumerate().map(|(idx, token)| {
+                    let provider = self.provider.clone();
+                    async move {
+                        if self.attributes.use_lending[idx] {
+                            if [COMPOUND_POOL_ADDRESS, AAVE_POOL_ADDRESS, IRON_BANK_POOL].contains(&self.address) {
+                                let (rate_res, sr_res, ab_res) = tokio::join!(
+                                    provider.call(TransactionRequest::default().to(token.address()).input(exchangeRateStoredCall {}.abi_encode().into())).block(block_id),
+                                    provider.call(TransactionRequest::default().to(token.address()).input(supplyRatePerBlockCall {}.abi_encode().into())).block(block_id),
+                                    provider.call(TransactionRequest::default().to(token.address()).input(accrualBlockNumberCall {}.abi_encode().into())).block(block_id)
+                                );
+                                let mut rate = exchangeRateStoredCall::abi_decode_returns(&rate_res?)?;
+                                let supply_rate = supplyRatePerBlockCall::abi_decode_returns(&sr_res?)?;
+                                let old_block = accrualBlockNumberCall::abi_decode_returns(&ab_res?)?;
+
+                                if U256::from(block_number) > old_block {
+                                    let interest = (rate * supply_rate * (U256::from(block_number) - old_block)) / PRECISION;
+                                    rate += interest;
+                                }
+                                Ok(rate * self.attributes.precision_multipliers[idx])
+                            } else {
+                                let rate_bytes = provider.call(TransactionRequest::default().to(token.address()).input(exchangeRateStoredCall {}.abi_encode().into())).block(block_id).await?;
+                                let stored_rate = exchangeRateStoredCall::abi_decode_returns(&rate_bytes)?;
+                                Ok(stored_rate * self.attributes.precision_multipliers[idx])
+                            }
+                        } else {
+                            Ok(self.attributes.rates[idx])
+                        }
+                    }
+                });
+
+                futures::future::join_all(rate_futs).await.into_iter().collect()
+            }
+            SwapStrategyType::Oracle => self.get_oracle_rates(block_number).await,
+            _ => Ok(self.attributes.rates.clone()),
+        }
     }
 }
 
