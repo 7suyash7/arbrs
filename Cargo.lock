@@ -707,6 +707,7 @@ name = "arbrs"
 version = "0.1.0"
 dependencies = [
  "alloy",
+ "alloy-contract",
  "alloy-json-rpc",
  "alloy-network",
  "alloy-primitives",

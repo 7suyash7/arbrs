@@ -6,7 +6,7 @@ use arbrs::{
     db::DbManager,
     manager::{
         curve_pool_manager::CurvePoolManager, uniswap_v2_pool_manager::UniswapV2PoolManager,
-        uniswap_v3_pool_manager::UniswapV3PoolManager,
+        uniswap_v3_pool_manager::UniswapV3PoolManager, balancer_pool_manager::BalancerPoolManager,
     },
     TokenManager,
 };
@@ -48,6 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let curve_pool_manager =
         CurvePoolManager::new(token_manager.clone(), provider_arc.clone(), last_seen_block, db_manager.clone());
+    let mut balancer_pool_manager = BalancerPoolManager::new(token_manager.clone(), provider_arc.clone(), db_manager.clone(), last_seen_block);
 
    tracing::info!("Hydrating pool managers from database...");
     let mut successful_hydrations = 0;
@@ -68,6 +69,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
             "curve" => {
                 curve_pool_manager.build_pool_from_record(record).await
+            },
+            "balancer" => {
+                let _ = balancer_pool_manager.build_pool(record.address).await;
             },
             unrecognized_dex => {
                 tracing::trace!(dex = unrecognized_dex, "Skipping unrecognized dex type");
@@ -91,8 +95,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let arbitrage_engine = ArbitrageEngine::new(arbitrage_cache.clone());
     
     println!("Finding initial arbitrage paths...");
-    let initial_paths_2_pool = find_two_pool_cycles(&v2_pool_manager, &v3_pool_manager, &curve_pool_manager);
-    let initial_paths_3_pool = find_three_pool_cycles(&v2_pool_manager, &v3_pool_manager, &curve_pool_manager, &token_manager).await;
+    let initial_paths_2_pool = find_two_pool_cycles(&v2_pool_manager, &v3_pool_manager, &curve_pool_manager, &balancer_pool_manager);
+    let initial_paths_3_pool = find_three_pool_cycles(&v2_pool_manager, &v3_pool_manager, &curve_pool_manager, &token_manager, &balancer_pool_manager).await;
     let mut initial_paths = initial_paths_2_pool;
     initial_paths.extend(initial_paths_3_pool);
 
@@ -123,15 +127,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         if block_number % 10 == 0 {
             println!("\nChecking for new pools since block {}...", last_seen_block);
-            let (v2_discoveries, v3_discoveries, curve_discoveries) = tokio::join!(
+            let (v2_discoveries, v3_discoveries, curve_discoveries, balancer_discoveries) = tokio::join!(
                 v2_pool_manager.discover_pools_in_range(block_number),
                 v3_pool_manager.discover_pools_in_range(block_number),
-                curve_pool_manager.discover_pools_in_range(block_number)
+                curve_pool_manager.discover_pools_in_range(block_number),
+                balancer_pool_manager.discover_pools_in_range(block_number)
             );
 
             let new_pools_found = v2_discoveries.is_ok_and(|p| !p.is_empty())
                 || v3_discoveries.is_ok_and(|p| !p.is_empty())
-                || curve_discoveries.is_ok_and(|p| !p.is_empty());
+                || curve_discoveries.is_ok_and(|p| !p.is_empty())
+                || balancer_discoveries.is_ok_and(|p| !p.is_empty());
 
             if new_pools_found {
                 println!("New pools found! Rebuilding arbitrage paths...");

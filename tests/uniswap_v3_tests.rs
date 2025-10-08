@@ -384,7 +384,7 @@ async fn test_v3_simulations() {
         _ => panic!("Wrong snapshot type"),
     };
 
-    let amount_in_wbtc = U256::from(100_000_000); // 1 WBTC
+    let amount_in_wbtc = U256::from(100_000_000);
     let sim_result = pool.simulate_exact_input_swap(&wbtc, &weth, amount_in_wbtc, &snapshot).unwrap();
 
     let expected_weth_out = pool.calculate_tokens_out(&wbtc, &weth, amount_in_wbtc, &PoolSnapshot::UniswapV3(snapshot.clone())).unwrap();

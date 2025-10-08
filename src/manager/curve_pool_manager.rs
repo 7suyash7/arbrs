@@ -1,5 +1,3 @@
-// src/manager/curve_pool_manager.rs
-
 use crate::{
     curve::{attributes_builder, pool::CurveStableswapPool, registry::CurveRegistry},
     db::{DbManager, PoolRecord},

@@ -7,6 +7,7 @@ pub mod math;
 pub mod pool;
 pub mod arbitrage;
 pub mod db;
+pub mod balancer;
 
 pub use errors::ArbRsError;
 

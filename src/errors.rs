@@ -1,5 +1,6 @@
 use alloy::transports::{RpcError, TransportErrorKind};
 use alloy_primitives::Address;
+use alloy_contract::Error as ContractError;
 use thiserror::Error;
 
 #[derive(Error, Debug, PartialEq)]
@@ -38,10 +39,19 @@ pub enum ArbRsError {
 
     #[error("This pool is known to be broken and is not supported.")]
     BrokenPool,
+
+    #[error("Contract error: {0}")]
+    ContractError(String),
 }
 
 impl From<RpcError<TransportErrorKind>> for ArbRsError {
     fn from(error: RpcError<TransportErrorKind>) -> Self {
         ArbRsError::ProviderError(error.to_string())
+    }
+}
+
+impl From<ContractError<>> for ArbRsError {
+    fn from(error: ContractError<>) -> Self {
+        ArbRsError::ContractError(error.to_string())
     }
 }

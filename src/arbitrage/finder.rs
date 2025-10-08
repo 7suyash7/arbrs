@@ -5,8 +5,7 @@ use crate::{
     },
     core::token::Token,
     manager::{
-        curve_pool_manager::CurvePoolManager, uniswap_v2_pool_manager::UniswapV2PoolManager,
-        uniswap_v3_pool_manager::UniswapV3PoolManager,
+        balancer_pool_manager::BalancerPoolManager, curve_pool_manager::CurvePoolManager, uniswap_v2_pool_manager::UniswapV2PoolManager, uniswap_v3_pool_manager::UniswapV3PoolManager
     },
     pool::LiquidityPool, TokenLike, TokenManager,
 };
@@ -60,6 +59,7 @@ pub async fn find_three_pool_cycles<P>(
     v2_manager: &UniswapV2PoolManager<P>,
     v3_manager: &UniswapV3PoolManager<P>,
     curve_manager: &CurvePoolManager<P>,
+    balancer_manager: &BalancerPoolManager<P>,
     token_manager: &TokenManager<P>,
 ) -> Vec<Arc<dyn Arbitrage<P>>>
 where
@@ -69,6 +69,7 @@ where
     all_pools.extend(v2_manager.get_all_pools());
     all_pools.extend(v3_manager.get_all_pools());
     all_pools.extend(curve_manager.get_all_pools());
+    all_pools.extend(balancer_manager.get_all_pools());
 
     if all_pools.is_empty() {
         return Vec::new();
@@ -152,12 +153,14 @@ pub fn find_two_pool_cycles<P: Provider + Send + Sync + 'static + ?Sized>(
     v2_manager: &UniswapV2PoolManager<P>,
     v3_manager: &UniswapV3PoolManager<P>,
     curve_manager: &CurvePoolManager<P>,
+    balancer_manager: &BalancerPoolManager<P>,
 ) -> Vec<Arc<dyn Arbitrage<P>>> {
     let mut all_pools: Vec<Arc<dyn LiquidityPool<P>>> = Vec::new();
 
     all_pools.extend(v2_manager.get_all_pools());
     all_pools.extend(v3_manager.get_all_pools());
     all_pools.extend(curve_manager.get_all_pools());
+    all_pools.extend(balancer_manager.get_all_pools());
 
     tracing::info!("Finding 2-pool cycles across {} total pools...", all_pools.len());
     println!("Finding 2-pool cycles across {} total pools...", all_pools.len());

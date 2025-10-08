@@ -3,6 +3,7 @@ use crate::curve::types::CurvePoolSnapshot;
 use crate::errors::ArbRsError;
 use crate::pool::uniswap_v2::UniswapV2PoolState;
 use crate::pool::uniswap_v3::UniswapV3PoolSnapshot;
+use crate::balancer::pool::BalancerPoolSnapshot;
 use alloy_primitives::{Address, U256};
 use alloy_provider::Provider;
 use async_trait::async_trait;
@@ -28,6 +29,7 @@ pub enum PoolSnapshot {
     UniswapV2(UniswapV2PoolState),
     UniswapV3(UniswapV3PoolSnapshot),
     Curve(CurvePoolSnapshot),
+    Balancer(BalancerPoolSnapshot),
 }
 
 #[async_trait]
