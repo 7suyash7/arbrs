@@ -1,9 +1,9 @@
+use crate::balancer::pool::BalancerPoolSnapshot;
 use crate::core::token::Token;
 use crate::curve::types::CurvePoolSnapshot;
 use crate::errors::ArbRsError;
 use crate::pool::uniswap_v2::UniswapV2PoolState;
 use crate::pool::uniswap_v3::UniswapV3PoolSnapshot;
-use crate::balancer::pool::BalancerPoolSnapshot;
 use alloy_primitives::{Address, U256};
 use alloy_provider::Provider;
 use async_trait::async_trait;
@@ -70,13 +70,13 @@ pub trait LiquidityPool<P: Provider + Send + Sync + 'static + ?Sized>: Debug + S
         token_in: &Token<P>,
         token_out: &Token<P>,
     ) -> Result<f64, ArbRsError>;
-    
+
     async fn nominal_price(
         &self,
         token_in: &Token<P>,
         token_out: &Token<P>,
     ) -> Result<f64, ArbRsError>;
-        
+
     async fn absolute_exchange_rate(
         &self,
         token_in: &Token<P>,

@@ -34,7 +34,10 @@ pub trait Arbitrage<P: Provider + Send + Sync + 'static + ?Sized>: Debug + Send 
     ) -> Result<U256, ArbRsError>;
 
     /// Quickly checks if a path is potentially profitable. PURE & SYNCHRONOUS.
-    fn check_viability(&self, snapshots: &HashMap<Address, PoolSnapshot>) -> Result<bool, ArbRsError>;
+    fn check_viability(
+        &self,
+        snapshots: &HashMap<Address, PoolSnapshot>,
+    ) -> Result<bool, ArbRsError>;
 
     /// Allows for downcasting the trait object to its concrete type.
     fn as_any(&self) -> &dyn Any;

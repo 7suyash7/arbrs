@@ -1,6 +1,6 @@
 use alloy::transports::{RpcError, TransportErrorKind};
-use alloy_primitives::Address;
 use alloy_contract::Error as ContractError;
+use alloy_primitives::Address;
 use thiserror::Error;
 
 #[derive(Error, Debug, PartialEq)]
@@ -50,8 +50,8 @@ impl From<RpcError<TransportErrorKind>> for ArbRsError {
     }
 }
 
-impl From<ContractError<>> for ArbRsError {
-    fn from(error: ContractError<>) -> Self {
+impl From<ContractError> for ArbRsError {
+    fn from(error: ContractError) -> Self {
         ArbRsError::ContractError(error.to_string())
     }
 }

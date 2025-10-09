@@ -1,9 +1,4 @@
-use crate::{
-    core::token::Token,
-    errors::ArbRsError,
-    math::balancer::fixed_point as fp,
-    TokenLike,
-};
+use crate::{TokenLike, core::token::Token, errors::ArbRsError, math::balancer::fixed_point as fp};
 use alloy_primitives::U256;
 use alloy_provider::Provider;
 use std::sync::Arc;

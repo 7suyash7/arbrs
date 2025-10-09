@@ -1,7 +1,7 @@
 use alloy_primitives::{Address, address};
 use once_cell::sync::Lazy;
-use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DVariant {

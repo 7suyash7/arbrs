@@ -7,8 +7,8 @@ use crate::math::v3::{
     liquidity_math, swap_math, tick_bitmap,
     tick_math::{self},
 };
-use crate::pool::{LiquidityPool, PoolSnapshot};
 use crate::pool::uniswap_v3_snapshot::{LiquidityMap, UniswapV3PoolLiquidityMappingUpdate};
+use crate::pool::{LiquidityPool, PoolSnapshot};
 use alloy_primitives::{Address, Bytes, I256, U256};
 use alloy_provider::Provider;
 use alloy_rpc_types::{BlockId, TransactionRequest};
@@ -362,7 +362,9 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> UniswapV3Pool<P> {
         snapshot: &UniswapV3PoolSnapshot,
     ) -> Result<(I256, I256, UniswapV3PoolSnapshot), ArbRsError> {
         if amount_specified.is_zero() {
-            return Err(ArbRsError::CalculationError("Amount specified cannot be zero".into()));
+            return Err(ArbRsError::CalculationError(
+                "Amount specified cannot be zero".into(),
+            ));
         }
 
         let exact_input = amount_specified.is_positive();
@@ -375,46 +377,78 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> UniswapV3Pool<P> {
             liquidity: snapshot.liquidity,
         };
 
-        while !swap_state.amount_specified_remaining.is_zero() && swap_state.sqrt_price_x96 != sqrt_price_limit_x96 {
+        while !swap_state.amount_specified_remaining.is_zero()
+            && swap_state.sqrt_price_x96 != sqrt_price_limit_x96
+        {
             let (mut word_pos, _) = tick_bitmap::position(swap_state.tick / self.tick_spacing);
-            let bitmap = snapshot.tick_bitmap.get(&word_pos).copied().unwrap_or_default();
+            let bitmap = snapshot
+                .tick_bitmap
+                .get(&word_pos)
+                .copied()
+                .unwrap_or_default();
 
             let (next_tick, initialized) = if let Some(found_tick) =
                 tick_bitmap::next_initialized_tick_within_one_word(
-                    bitmap, swap_state.tick, self.tick_spacing, zero_for_one,
+                    bitmap,
+                    swap_state.tick,
+                    self.tick_spacing,
+                    zero_for_one,
                 ) {
                 Some(found_tick)
             } else {
                 // Simplified loop, just checks the BTreeMaps
                 if zero_for_one {
                     word_pos -= 1;
-                    snapshot.tick_bitmap.range(..=word_pos).rev().find_map(|(&pos, &bmp)| {
-                        if bmp != U256::ZERO {
-                            let next_init_tick = (pos as i32 * 256 + crate::math::v3::bit_math::most_significant_bit(bmp) as i32) * self.tick_spacing;
-                            Some((next_init_tick, true))
-                        } else { None }
-                    })
+                    snapshot
+                        .tick_bitmap
+                        .range(..=word_pos)
+                        .rev()
+                        .find_map(|(&pos, &bmp)| {
+                            if bmp != U256::ZERO {
+                                let next_init_tick = (pos as i32 * 256
+                                    + crate::math::v3::bit_math::most_significant_bit(bmp) as i32)
+                                    * self.tick_spacing;
+                                Some((next_init_tick, true))
+                            } else {
+                                None
+                            }
+                        })
                 } else {
                     word_pos += 1;
-                    snapshot.tick_bitmap.range(word_pos..).find_map(|(&pos, &bmp)| {
-                         if bmp != U256::ZERO {
-                            let next_init_tick = (pos as i32 * 256 + crate::math::v3::bit_math::least_significant_bit(bmp) as i32) * self.tick_spacing;
-                            Some((next_init_tick, true))
-                        } else { None }
-                    })
+                    snapshot
+                        .tick_bitmap
+                        .range(word_pos..)
+                        .find_map(|(&pos, &bmp)| {
+                            if bmp != U256::ZERO {
+                                let next_init_tick = (pos as i32 * 256
+                                    + crate::math::v3::bit_math::least_significant_bit(bmp) as i32)
+                                    * self.tick_spacing;
+                                Some((next_init_tick, true))
+                            } else {
+                                None
+                            }
+                        })
                 }
-            }.unwrap_or((if zero_for_one { MIN_TICK } else { MAX_TICK }, false));
-
+            }
+            .unwrap_or((if zero_for_one { MIN_TICK } else { MAX_TICK }, false));
 
             let next_tick = next_tick.clamp(MIN_TICK, MAX_TICK);
             let sqrt_price_next_tick = tick_math::get_sqrt_ratio_at_tick(next_tick)?;
-            let sqrt_price_target = if (zero_for_one && sqrt_price_next_tick < sqrt_price_limit_x96) || (!zero_for_one && sqrt_price_next_tick > sqrt_price_limit_x96) {
+            let sqrt_price_target = if (zero_for_one && sqrt_price_next_tick < sqrt_price_limit_x96)
+                || (!zero_for_one && sqrt_price_next_tick > sqrt_price_limit_x96)
+            {
                 sqrt_price_limit_x96
             } else {
                 sqrt_price_next_tick
             };
 
-            let step = swap_math::compute_swap_step(swap_state.sqrt_price_x96, sqrt_price_target, swap_state.liquidity, swap_state.amount_specified_remaining, self.fee)?;
+            let step = swap_math::compute_swap_step(
+                swap_state.sqrt_price_x96,
+                sqrt_price_target,
+                swap_state.liquidity,
+                swap_state.amount_specified_remaining,
+                self.fee,
+            )?;
 
             swap_state.sqrt_price_x96 = step.sqrt_ratio_next_x96;
             if exact_input {
@@ -427,21 +461,43 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> UniswapV3Pool<P> {
 
             if swap_state.sqrt_price_x96 == sqrt_price_next_tick {
                 if initialized {
-                    let liquidity_net = snapshot.tick_data.get(&next_tick).map(|t| t.liquidity_net).unwrap_or(0);
-                    swap_state.liquidity = liquidity_math::add_delta(swap_state.liquidity, if zero_for_one { -liquidity_net } else { liquidity_net }).ok_or(ArbRsError::CalculationError("Liquidity math error".into()))?;
+                    let liquidity_net = snapshot
+                        .tick_data
+                        .get(&next_tick)
+                        .map(|t| t.liquidity_net)
+                        .unwrap_or(0);
+                    swap_state.liquidity = liquidity_math::add_delta(
+                        swap_state.liquidity,
+                        if zero_for_one {
+                            -liquidity_net
+                        } else {
+                            liquidity_net
+                        },
+                    )
+                    .ok_or(ArbRsError::CalculationError("Liquidity math error".into()))?;
                 }
-                swap_state.tick = if zero_for_one { next_tick - 1 } else { next_tick };
+                swap_state.tick = if zero_for_one {
+                    next_tick - 1
+                } else {
+                    next_tick
+                };
             } else {
                 swap_state.tick = tick_math::get_tick_at_sqrt_ratio(swap_state.sqrt_price_x96)?;
             }
         }
-        
+
         let (amount0_delta, amount1_delta) = if zero_for_one {
-            (amount_specified - swap_state.amount_specified_remaining, swap_state.amount_calculated)
+            (
+                amount_specified - swap_state.amount_specified_remaining,
+                swap_state.amount_calculated,
+            )
         } else {
-            (swap_state.amount_calculated, amount_specified - swap_state.amount_specified_remaining)
+            (
+                swap_state.amount_calculated,
+                amount_specified - swap_state.amount_specified_remaining,
+            )
         };
-        
+
         let final_state = UniswapV3PoolSnapshot {
             liquidity: swap_state.liquidity,
             sqrt_price_x96: swap_state.sqrt_price_x96,
@@ -577,8 +633,12 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> UniswapV3Pool<P> {
             MAX_SQRT_RATIO - U256::from(1)
         };
 
-        let (amount0_delta, amount1_delta, final_state) = self
-            ._calculate_swap_from_snapshot(zero_for_one, amount_specified, sqrt_price_limit_x96, snapshot)?;
+        let (amount0_delta, amount1_delta, final_state) = self._calculate_swap_from_snapshot(
+            zero_for_one,
+            amount_specified,
+            sqrt_price_limit_x96,
+            snapshot,
+        )?;
 
         Ok(UniswapV3PoolSimulationResult {
             amount0_delta,
@@ -604,9 +664,13 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> UniswapV3Pool<P> {
         } else {
             MAX_SQRT_RATIO - U256::from(1)
         };
-        
-        let (amount0_delta, amount1_delta, final_state) = self
-            ._calculate_swap_from_snapshot(zero_for_one, amount_specified, sqrt_price_limit_x96, snapshot)?;
+
+        let (amount0_delta, amount1_delta, final_state) = self._calculate_swap_from_snapshot(
+            zero_for_one,
+            amount_specified,
+            sqrt_price_limit_x96,
+            snapshot,
+        )?;
 
         Ok(UniswapV3PoolSimulationResult {
             amount0_delta,
@@ -699,7 +763,11 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> LiquidityPool<P> for UniswapV
         self.validate_token_pair(token_in, token_out)?;
         let v3_snapshot = match snapshot {
             PoolSnapshot::UniswapV3(s) => s,
-            _ => return Err(ArbRsError::CalculationError("Invalid snapshot for V3 pool".into())),
+            _ => {
+                return Err(ArbRsError::CalculationError(
+                    "Invalid snapshot for V3 pool".into(),
+                ));
+            }
         };
 
         let zero_for_one = token_in.address() == self.token0.address();
@@ -711,8 +779,12 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> LiquidityPool<P> for UniswapV
             MAX_SQRT_RATIO - U256::from(1)
         };
 
-        let (amount0_delta, amount1_delta, _final_state) =
-            self._calculate_swap_from_snapshot(zero_for_one, amount_specified, sqrt_price_limit_x96, v3_snapshot)?;
+        let (amount0_delta, amount1_delta, _final_state) = self._calculate_swap_from_snapshot(
+            zero_for_one,
+            amount_specified,
+            sqrt_price_limit_x96,
+            v3_snapshot,
+        )?;
 
         Ok(if zero_for_one {
             (-amount1_delta).into_raw()
@@ -731,7 +803,11 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> LiquidityPool<P> for UniswapV
         self.validate_token_pair(token_in, token_out)?;
         let v3_snapshot = match snapshot {
             PoolSnapshot::UniswapV3(s) => s,
-            _ => return Err(ArbRsError::CalculationError("Invalid snapshot for V3 pool".into())),
+            _ => {
+                return Err(ArbRsError::CalculationError(
+                    "Invalid snapshot for V3 pool".into(),
+                ));
+            }
         };
 
         let zero_for_one = token_out.address() == self.token1.address();
@@ -743,8 +819,12 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> LiquidityPool<P> for UniswapV
             MAX_SQRT_RATIO - U256::from(1)
         };
 
-        let (amount0_delta, amount1_delta, _final_state) =
-            self._calculate_swap_from_snapshot(zero_for_one, amount_specified, sqrt_price_limit_x96, v3_snapshot)?;
+        let (amount0_delta, amount1_delta, _final_state) = self._calculate_swap_from_snapshot(
+            zero_for_one,
+            amount_specified,
+            sqrt_price_limit_x96,
+            v3_snapshot,
+        )?;
 
         Ok(if zero_for_one {
             amount0_delta.into_raw()
@@ -801,22 +881,26 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> LiquidityPool<P> for UniswapV
     }
 
     async fn absolute_exchange_rate(
-            &self,
-            token_in: &Token<P>,
-            token_out: &Token<P>,
-        ) -> Result<f64, ArbRsError> {
-            let price = self.absolute_price(token_out, token_in).await?;
-            Ok(price)
-        }
+        &self,
+        token_in: &Token<P>,
+        token_out: &Token<P>,
+    ) -> Result<f64, ArbRsError> {
+        let price = self.absolute_price(token_out, token_in).await?;
+        Ok(price)
+    }
 
     async fn get_snapshot(&self, block_number: Option<u64>) -> Result<PoolSnapshot, ArbRsError> {
         let block_id = block_number.map(BlockId::from).unwrap_or(BlockId::latest());
 
         let slot0_call = slot0Call {};
-        let slot0_request = TransactionRequest::default().to(self.address).input(slot0_call.abi_encode().into());
+        let slot0_request = TransactionRequest::default()
+            .to(self.address)
+            .input(slot0_call.abi_encode().into());
 
         let liquidity_call = liquidityCall {};
-        let liquidity_request = TransactionRequest::default().to(self.address).input(liquidity_call.abi_encode().into());
+        let liquidity_request = TransactionRequest::default()
+            .to(self.address)
+            .input(liquidity_call.abi_encode().into());
 
         let (slot0_res, liquidity_res) = tokio::join!(
             self.provider.call(slot0_request).block(block_id),

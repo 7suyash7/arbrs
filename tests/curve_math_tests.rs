@@ -5,10 +5,11 @@ mod curve_tests {
     use alloy_rpc_types::TransactionRequest;
     use alloy_sol_types::{SolCall, sol};
     use arbrs::{
-        curve::{
-            pool::CurveStableswapPool,
-            registry::CurveRegistry,
-        }, db::DbManager, manager::token_manager::TokenManager, pool::LiquidityPool, ArbRsError, TokenLike
+        ArbRsError, TokenLike,
+        curve::{pool::CurveStableswapPool, registry::CurveRegistry},
+        db::DbManager,
+        manager::token_manager::TokenManager,
+        pool::LiquidityPool,
     };
     use itertools::Itertools;
     use std::sync::Arc;
@@ -43,11 +44,19 @@ mod curve_tests {
         }
     }
 
-    async fn setup() -> (Arc<DynProvider>, Arc<DbManager>, Arc<TokenManager<DynProvider>>) {
+    async fn setup() -> (
+        Arc<DynProvider>,
+        Arc<DbManager>,
+        Arc<TokenManager<DynProvider>>,
+    ) {
         let provider = ProviderBuilder::new().connect_http(FORK_RPC_URL.parse().unwrap());
         let provider_arc: Arc<DynProvider> = Arc::new(provider);
         let db_manager = Arc::new(DbManager::new(DB_URL).await.unwrap());
-        let token_manager = Arc::new(TokenManager::new(provider_arc.clone(), 1, db_manager.clone()));
+        let token_manager = Arc::new(TokenManager::new(
+            provider_arc.clone(),
+            1,
+            db_manager.clone(),
+        ));
         (provider_arc, db_manager, token_manager)
     }
 
@@ -55,10 +64,21 @@ mod curve_tests {
     async fn setup_pool(pool_address: Address) -> Arc<CurveStableswapPool<DynProvider>> {
         let (provider, _db, token_manager) = setup().await;
         let registry = CurveRegistry::new(CURVE_MAINNET_REGISTRY, provider.clone());
-        
+
         // Build attributes by fetching tokens first
-        let tokens = CurveStableswapPool::<_>::fetch_coins(&pool_address, provider.clone(), &token_manager).await.unwrap();
-        let attributes = arbrs::curve::attributes_builder::build_attributes(pool_address, &tokens, provider.clone(), &token_manager, &registry).await.unwrap();
+        let tokens =
+            CurveStableswapPool::<_>::fetch_coins(&pool_address, provider.clone(), &token_manager)
+                .await
+                .unwrap();
+        let attributes = arbrs::curve::attributes_builder::build_attributes(
+            pool_address,
+            &tokens,
+            provider.clone(),
+            &token_manager,
+            &registry,
+        )
+        .await
+        .unwrap();
 
         Arc::new(
             CurveStableswapPool::new(pool_address, provider, token_manager, &registry, attributes)
@@ -77,16 +97,40 @@ mod curve_tests {
             let j = pool.tokens.iter().position(|t| **t == *token_out).unwrap() as i128;
             let amount_in = U256::from(100) * U256::from(10).pow(U256::from(token_in.decimals()));
 
-            let local_amount_out = pool.calculate_tokens_out(&token_in, &token_out, amount_in, &snapshot).unwrap();
+            let local_amount_out = pool
+                .calculate_tokens_out(&token_in, &token_out, amount_in, &snapshot)
+                .unwrap();
 
-            let onchain_call = get_dyCall { i, j, dx: amount_in };
-            let request = TransactionRequest::default().to(pool.address).input(onchain_call.abi_encode().into());
-            let result_bytes = provider.call(request).block(TEST_BLOCK.into()).await.unwrap();
+            let onchain_call = get_dyCall {
+                i,
+                j,
+                dx: amount_in,
+            };
+            let request = TransactionRequest::default()
+                .to(pool.address)
+                .input(onchain_call.abi_encode().into());
+            let result_bytes = provider
+                .call(request)
+                .block(TEST_BLOCK.into())
+                .await
+                .unwrap();
             let onchain_amount_out = get_dyCall::abi_decode_returns(&result_bytes).unwrap();
-            
-            let difference = if local_amount_out > onchain_amount_out { local_amount_out - onchain_amount_out } else { onchain_amount_out - local_amount_out };
+
+            let difference = if local_amount_out > onchain_amount_out {
+                local_amount_out - onchain_amount_out
+            } else {
+                onchain_amount_out - local_amount_out
+            };
             let tolerance = onchain_amount_out / U256::from(1);
-            assert!(difference <= tolerance, "Swap failed for {}->{}: local={}, onchain={}, diff={}", token_in.symbol(), token_out.symbol(), local_amount_out, onchain_amount_out, difference);
+            assert!(
+                difference <= tolerance,
+                "Swap failed for {}->{}: local={}, onchain={}, diff={}",
+                token_in.symbol(),
+                token_out.symbol(),
+                local_amount_out,
+                onchain_amount_out,
+                difference
+            );
         }
     }
 
@@ -103,18 +147,49 @@ mod curve_tests {
 
         for p in pool.underlying_tokens.iter().permutations(2) {
             let (token_in, token_out) = (p[0].clone(), p[1].clone());
-            let i = pool.underlying_tokens.iter().position(|t| **t == *token_in).unwrap() as i128;
-            let j = pool.underlying_tokens.iter().position(|t| **t == *token_out).unwrap() as i128;
+            let i = pool
+                .underlying_tokens
+                .iter()
+                .position(|t| **t == *token_in)
+                .unwrap() as i128;
+            let j = pool
+                .underlying_tokens
+                .iter()
+                .position(|t| **t == *token_out)
+                .unwrap() as i128;
             let amount_in = U256::from(100) * U256::from(10).pow(U256::from(token_in.decimals()));
 
-            let local_amount_out = pool.calculate_dy_underlying_from_snapshot(&token_in, &token_out, amount_in, self_curve_snapshot, &base_snapshot).unwrap();
-            
-            let onchain_call = get_dy_underlyingCall { i, j, dx: amount_in };
-            let request = TransactionRequest::default().to(pool.address).input(onchain_call.abi_encode().into());
-            let result_bytes = provider.call(request).block(TEST_BLOCK.into()).await.unwrap();
-            let onchain_amount_out = get_dy_underlyingCall::abi_decode_returns(&result_bytes).unwrap();
-            
-            let difference = if local_amount_out > onchain_amount_out { local_amount_out - onchain_amount_out } else { onchain_amount_out - local_amount_out };
+            let local_amount_out = pool
+                .calculate_dy_underlying_from_snapshot(
+                    &token_in,
+                    &token_out,
+                    amount_in,
+                    self_curve_snapshot,
+                    &base_snapshot,
+                )
+                .unwrap();
+
+            let onchain_call = get_dy_underlyingCall {
+                i,
+                j,
+                dx: amount_in,
+            };
+            let request = TransactionRequest::default()
+                .to(pool.address)
+                .input(onchain_call.abi_encode().into());
+            let result_bytes = provider
+                .call(request)
+                .block(TEST_BLOCK.into())
+                .await
+                .unwrap();
+            let onchain_amount_out =
+                get_dy_underlyingCall::abi_decode_returns(&result_bytes).unwrap();
+
+            let difference = if local_amount_out > onchain_amount_out {
+                local_amount_out - onchain_amount_out
+            } else {
+                onchain_amount_out - local_amount_out
+            };
             assert!(difference <= U256::from(100), "Underlying swap failed");
         }
     }
@@ -126,26 +201,61 @@ mod curve_tests {
             arbrs::pool::PoolSnapshot::Curve(s) => s,
             _ => panic!("Expected Curve snapshot, found another variant"),
         };
-        let lp_total_supply = pool.lp_token.get_total_supply(Some(TEST_BLOCK)).await.unwrap();
+        let lp_total_supply = pool
+            .lp_token
+            .get_total_supply(Some(TEST_BLOCK))
+            .await
+            .unwrap();
 
-        let amounts: [U256; 3] = [U256::from(100) * U256::from(10).pow(U256::from(18)), U256::ZERO, U256::ZERO];
-        let local_lp_amount = pool.calc_token_amount_from_snapshot(&amounts, true, curve_snapshot, lp_total_supply).unwrap();
-        
-        let onchain_call = calc_token_amountCall { amounts: amounts.into(), is_deposit: true };
-        let request = TransactionRequest::default().to(pool.address).input(onchain_call.abi_encode().into());
-        let result_bytes = provider.call(request).block(TEST_BLOCK.into()).await.unwrap();
+        let amounts: [U256; 3] = [
+            U256::from(100) * U256::from(10).pow(U256::from(18)),
+            U256::ZERO,
+            U256::ZERO,
+        ];
+        let local_lp_amount = pool
+            .calc_token_amount_from_snapshot(&amounts, true, curve_snapshot, lp_total_supply)
+            .unwrap();
+
+        let onchain_call = calc_token_amountCall {
+            amounts: amounts.into(),
+            is_deposit: true,
+        };
+        let request = TransactionRequest::default()
+            .to(pool.address)
+            .input(onchain_call.abi_encode().into());
+        let result_bytes = provider
+            .call(request)
+            .block(TEST_BLOCK.into())
+            .await
+            .unwrap();
         let onchain_lp_amount = calc_token_amountCall::abi_decode_returns(&result_bytes).unwrap();
         assert_eq!(local_lp_amount, onchain_lp_amount);
 
         let lp_token_amount = U256::from(100) * U256::from(10).pow(U256::from(18));
         let i = 0;
-        let (local_amount_out, _) = pool.calc_withdraw_one_coin_from_snapshot(lp_token_amount, i, &snapshot, lp_total_supply).unwrap();
+        let (local_amount_out, _) = pool
+            .calc_withdraw_one_coin_from_snapshot(lp_token_amount, i, &snapshot, lp_total_supply)
+            .unwrap();
 
-        let onchain_call = calc_withdraw_one_coinCall { _token_amount: lp_token_amount, i: i as i128 };
-        let request = TransactionRequest::default().to(pool.address).input(onchain_call.abi_encode().into());
-        let result_bytes = provider.call(request).block(TEST_BLOCK.into()).await.unwrap();
-        let onchain_amount_out = calc_withdraw_one_coinCall::abi_decode_returns(&result_bytes).unwrap();
-        let difference = if local_amount_out > onchain_amount_out { local_amount_out - onchain_amount_out } else { onchain_amount_out - local_amount_out };
+        let onchain_call = calc_withdraw_one_coinCall {
+            _token_amount: lp_token_amount,
+            i: i as i128,
+        };
+        let request = TransactionRequest::default()
+            .to(pool.address)
+            .input(onchain_call.abi_encode().into());
+        let result_bytes = provider
+            .call(request)
+            .block(TEST_BLOCK.into())
+            .await
+            .unwrap();
+        let onchain_amount_out =
+            calc_withdraw_one_coinCall::abi_decode_returns(&result_bytes).unwrap();
+        let difference = if local_amount_out > onchain_amount_out {
+            local_amount_out - onchain_amount_out
+        } else {
+            onchain_amount_out - local_amount_out
+        };
         assert!(difference <= U256::from(1));
     }
 
@@ -184,12 +294,26 @@ mod curve_tests {
         let token_manager = Arc::new(TokenManager::new(provider.clone(), 1, db_manager));
         let registry = CurveRegistry::new(CURVE_MAINNET_REGISTRY, provider.clone());
 
-        let tokens = CurveStableswapPool::<_>::fetch_coins(&pool_address, provider.clone(), &token_manager).await?;
-        let attributes = arbrs::curve::attributes_builder::build_attributes(pool_address, &tokens, provider.clone(), &token_manager, &registry).await?;
-
-        let pool =
-            CurveStableswapPool::new(pool_address, provider, token_manager.clone(), &registry, attributes)
+        let tokens =
+            CurveStableswapPool::<_>::fetch_coins(&pool_address, provider.clone(), &token_manager)
                 .await?;
+        let attributes = arbrs::curve::attributes_builder::build_attributes(
+            pool_address,
+            &tokens,
+            provider.clone(),
+            &token_manager,
+            &registry,
+        )
+        .await?;
+
+        let pool = CurveStableswapPool::new(
+            pool_address,
+            provider,
+            token_manager.clone(),
+            &registry,
+            attributes,
+        )
+        .await?;
         Ok(Arc::new(pool))
     }
 

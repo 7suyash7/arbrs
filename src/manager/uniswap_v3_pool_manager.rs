@@ -7,7 +7,7 @@ use crate::pool::{
 use alloy_primitives::Address;
 use alloy_provider::Provider;
 use dashmap::DashMap;
-use futures::{stream, StreamExt};
+use futures::{StreamExt, stream};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
@@ -107,14 +107,18 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> UniswapV3PoolManager<P> {
 
         while from_block <= end_block {
             let to_block = (from_block + CHUNK_SIZE - 1).min(end_block);
-            println!("[V3 Manager] Discovering pools from block {} to {}", from_block, to_block);
+            println!(
+                "[V3 Manager] Discovering pools from block {} to {}",
+                from_block, to_block
+            );
 
             let discovered_pools_data = discover_new_v3_pools(
                 self.provider.clone(),
                 self.factory_address,
                 from_block,
                 to_block,
-            ).await?;
+            )
+            .await?;
 
             const CONCURRENT_BUILDS: usize = 5;
             let new_pools_in_chunk = Arc::new(Mutex::new(Vec::new()));
@@ -143,7 +147,9 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> UniswapV3PoolManager<P> {
                             pool_data.token1,
                             pool_data.fee,
                             pool_data.tick_spacing,
-                        ).await {
+                        )
+                        .await
+                        {
                             let mut new_pools_guard = new_pools.lock().await;
                             new_pools_guard.push(pool);
                         }
@@ -153,7 +159,7 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> UniswapV3PoolManager<P> {
 
             let new_pools = Arc::try_unwrap(new_pools_in_chunk).unwrap().into_inner();
             all_new_pools.extend(new_pools);
-            
+
             from_block = to_block + 1;
         }
 
@@ -189,8 +195,12 @@ async fn build_and_register_v3_pool<P: Provider + Send + Sync + 'static + ?Sized
         snapshot.liquidity_snapshot.get(&pool_address).cloned()
     };
 
-    let token0 = token_manager.get_token(if token_a < token_b { token_a } else { token_b }).await?;
-    let token1 = token_manager.get_token(if token_a < token_b { token_b } else { token_a }).await?;
+    let token0 = token_manager
+        .get_token(if token_a < token_b { token_a } else { token_b })
+        .await?;
+    let token1 = token_manager
+        .get_token(if token_a < token_b { token_b } else { token_a })
+        .await?;
 
     let pool = Arc::new(UniswapV3Pool::new(
         pool_address,

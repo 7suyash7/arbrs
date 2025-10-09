@@ -2,9 +2,9 @@ use crate::core::messaging::{Publisher, PublisherMessage, Subscriber};
 use crate::core::token::{Token, TokenLike};
 use crate::errors::ArbRsError;
 use crate::math::v3::full_math;
-use crate::pool::{LiquidityPool, PoolSnapshot};
 use crate::pool::strategy::V2CalculationStrategy;
 use crate::pool::uniswap_v2_simulation::UniswapV2PoolSimulationResult;
+use crate::pool::{LiquidityPool, PoolSnapshot};
 use alloy_primitives::{Address, B256, Bytes, I256, TxKind, U256, keccak256};
 use alloy_provider::Provider;
 use alloy_rpc_types::{BlockId, BlockNumberOrTag, TransactionRequest};
@@ -610,7 +610,11 @@ impl<P: Provider + Send + Sync + ?Sized + 'static, S: V2CalculationStrategy + 's
         self.validate_token_pair(token_in, token_out)?;
         let v2_snapshot = match snapshot {
             PoolSnapshot::UniswapV2(s) => s,
-            _ => return Err(ArbRsError::CalculationError("Invalid snapshot for V2 pool".into())),
+            _ => {
+                return Err(ArbRsError::CalculationError(
+                    "Invalid snapshot for V2 pool".into(),
+                ));
+            }
         };
 
         let (reserve_in, reserve_out) = if token_in.address() == self.token0.address() {
@@ -619,7 +623,8 @@ impl<P: Provider + Send + Sync + ?Sized + 'static, S: V2CalculationStrategy + 's
             (v2_snapshot.reserve1, v2_snapshot.reserve0)
         };
 
-        self.strategy.calculate_tokens_out(reserve_in, reserve_out, amount_in)
+        self.strategy
+            .calculate_tokens_out(reserve_in, reserve_out, amount_in)
     }
 
     fn calculate_tokens_in(
@@ -632,7 +637,11 @@ impl<P: Provider + Send + Sync + ?Sized + 'static, S: V2CalculationStrategy + 's
         self.validate_token_pair(token_in, token_out)?;
         let v2_snapshot = match snapshot {
             PoolSnapshot::UniswapV2(s) => s,
-            _ => return Err(ArbRsError::CalculationError("Invalid snapshot for V2 pool".into())),
+            _ => {
+                return Err(ArbRsError::CalculationError(
+                    "Invalid snapshot for V2 pool".into(),
+                ));
+            }
         };
 
         let (reserve_in, reserve_out) = if token_out.address() == self.token1.address() {
@@ -641,7 +650,8 @@ impl<P: Provider + Send + Sync + ?Sized + 'static, S: V2CalculationStrategy + 's
             (v2_snapshot.reserve1, v2_snapshot.reserve0)
         };
 
-        self.strategy.calculate_tokens_in_from_tokens_out(reserve_in, reserve_out, amount_out)
+        self.strategy
+            .calculate_tokens_in_from_tokens_out(reserve_in, reserve_out, amount_out)
     }
 
     async fn absolute_price(
@@ -701,10 +711,12 @@ impl<P: Provider + Send + Sync + ?Sized + 'static, S: V2CalculationStrategy + 's
             .to(self.address)
             .input(call.abi_encode().into());
 
-        let result_bytes = self.provider.call(request)
+        let result_bytes = self
+            .provider
+            .call(request)
             .block(block_number.map(BlockId::from).unwrap_or(BlockId::latest()))
             .await?;
-            
+
         let reserves = getReservesCall::abi_decode_returns(&result_bytes)?;
 
         let snapshot = UniswapV2PoolState {

@@ -2,9 +2,9 @@ use crate::curve::constants::{FEE_DENOMINATOR, PRECISION};
 use crate::curve::pool::CurveStableswapPool;
 use crate::curve::pool_overrides::{DVariant, Y_VARIANT_GROUP_0, Y_VARIANT_GROUP_1};
 use crate::curve::tricrypto_math::TEN_POW_18;
+use crate::curve::types::CurvePoolSnapshot;
 use crate::curve::{math, tricrypto_math};
 use crate::errors::ArbRsError;
-use crate::curve::types::CurvePoolSnapshot;
 use alloy_primitives::{Address, U256, address};
 use alloy_provider::Provider;
 
@@ -51,7 +51,7 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> SwapStrategy<P> for DefaultSt
     fn calculate_dy(&self, params: &SwapParams<P>) -> Result<U256, ArbRsError> {
         let (i, j, dx) = (params.i, params.j, params.dx);
         let attributes = &params.pool.attributes;
-        
+
         let balances = &params.snapshot.balances;
         let fee = params.snapshot.fee;
         let amp = params.snapshot.a;
@@ -62,26 +62,38 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> SwapStrategy<P> for DefaultSt
         let dx_scaled = (dx * rates[i])
             .checked_div(PRECISION)
             .ok_or_else(|| ArbRsError::CalculationError("dx_scaled division failed".to_string()))?;
-        
+
         let x = xp[i]
             .checked_add(dx_scaled)
             .ok_or_else(|| ArbRsError::CalculationError("x addition failed".to_string()))?;
-        
+
         let is_y0 = Y_VARIANT_GROUP_0.contains(&params.pool.address);
         let is_y1 = Y_VARIANT_GROUP_1.contains(&params.pool.address);
-        let y = math::get_y(i, j, x, &xp, amp, attributes.n_coins, attributes.d_variant, is_y0, is_y1)?;
-        
+        let y = math::get_y(
+            i,
+            j,
+            x,
+            &xp,
+            amp,
+            attributes.n_coins,
+            attributes.d_variant,
+            is_y0,
+            is_y1,
+        )?;
+
         let dy = xp[j].saturating_sub(y).saturating_sub(U256::from(1));
-        
-        let fee_amount = (dy * fee)
-            .checked_div(FEE_DENOMINATOR)
-            .ok_or_else(|| ArbRsError::CalculationError("fee_amount division failed".to_string()))?;
+
+        let fee_amount = (dy * fee).checked_div(FEE_DENOMINATOR).ok_or_else(|| {
+            ArbRsError::CalculationError("fee_amount division failed".to_string())
+        })?;
 
         let dy_after_fee = dy.saturating_sub(fee_amount);
-        
+
         let rate_j = rates[j];
-        if rate_j.is_zero() { return Err(ArbRsError::CalculationError("Rate is zero".into())); }
-        
+        if rate_j.is_zero() {
+            return Err(ArbRsError::CalculationError("Rate is zero".into()));
+        }
+
         (dy_after_fee * PRECISION)
             .checked_div(rate_j)
             .ok_or_else(|| ArbRsError::CalculationError("final dy division failed".to_string()))
@@ -95,40 +107,53 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> SwapStrategy<P> for DefaultSt
         let fee = params.snapshot.fee;
         let amp = params.snapshot.a;
         let rates = &params.snapshot.rates;
-        
+
         let xp = math::xp(rates, balances)?;
-        
+
         let dy_plus_fee = (dy * FEE_DENOMINATOR)
             .checked_div(FEE_DENOMINATOR.saturating_sub(fee))
-            .ok_or_else(|| ArbRsError::CalculationError("dy_plus_fee division failed".to_string()))?;
-            
+            .ok_or_else(|| {
+                ArbRsError::CalculationError("dy_plus_fee division failed".to_string())
+            })?;
+
         let dy_scaled = (dy_plus_fee * rates[j])
             .checked_div(PRECISION)
             .ok_or_else(|| ArbRsError::CalculationError("dy_scaled division failed".to_string()))?;
-            
+
         let y = xp[j]
             .checked_sub(dy_scaled)
             .ok_or_else(|| ArbRsError::CalculationError("y subtraction failed".to_string()))?;
-        
+
         let is_y0 = Y_VARIANT_GROUP_0.contains(&params.pool.address);
         let is_y1 = Y_VARIANT_GROUP_1.contains(&params.pool.address);
-        let x = math::get_y(j, i, y, &xp, amp, attributes.n_coins, attributes.d_variant, is_y0, is_y1)?;
-        
-        let dx_scaled = x
-            .checked_sub(xp[i])
-            .ok_or_else(|| ArbRsError::CalculationError("dx_scaled subtraction failed".to_string()))?;
-            
+        let x = math::get_y(
+            j,
+            i,
+            y,
+            &xp,
+            amp,
+            attributes.n_coins,
+            attributes.d_variant,
+            is_y0,
+            is_y1,
+        )?;
+
+        let dx_scaled = x.checked_sub(xp[i]).ok_or_else(|| {
+            ArbRsError::CalculationError("dx_scaled subtraction failed".to_string())
+        })?;
+
         let rate_i = rates[i];
-        if rate_i.is_zero() { return Err(ArbRsError::CalculationError("Rate is zero".into())); }
-        
+        if rate_i.is_zero() {
+            return Err(ArbRsError::CalculationError("Rate is zero".into()));
+        }
+
         let final_dx = (dx_scaled * PRECISION)
             .checked_div(rate_i)
             .ok_or_else(|| ArbRsError::CalculationError("final_dx division failed".to_string()))?;
-            
+
         Ok(final_dx.saturating_add(U256::from(1)))
     }
 }
-
 
 #[derive(Debug, Default)]
 pub struct MetapoolStrategy;
@@ -140,34 +165,59 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> SwapStrategy<P> for MetapoolS
         let balances = &params.snapshot.balances;
         let fee = params.snapshot.fee;
         let amp = params.snapshot.a;
-        let virtual_price = params.snapshot.base_pool_virtual_price
-            .ok_or_else(|| ArbRsError::CalculationError("Metapool virtual price not in snapshot".to_string()))?;
-        
+        let virtual_price = params.snapshot.base_pool_virtual_price.ok_or_else(|| {
+            ArbRsError::CalculationError("Metapool virtual price not in snapshot".to_string())
+        })?;
+
         let rates = match params.pool.address {
             STETH_USDC_METAPOOL => vec![PRECISION, virtual_price],
             RETH_ETH_METAPOOL => vec![
-                params.snapshot.scaled_redemption_price.ok_or_else(|| ArbRsError::CalculationError("Missing scaled redemption price".to_string()))?,
-                virtual_price
+                params.snapshot.scaled_redemption_price.ok_or_else(|| {
+                    ArbRsError::CalculationError("Missing scaled redemption price".to_string())
+                })?,
+                virtual_price,
             ],
             _ => vec![attributes.rates[0], virtual_price],
         };
 
         let xp = math::xp(&rates, balances)?;
-        let dx_scaled = (dx * rates[i]).checked_div(PRECISION).ok_or_else(|| ArbRsError::CalculationError("Metapool dy: dx_scaled failed".into()))?;
-        let x = xp[i].checked_add(dx_scaled).ok_or_else(|| ArbRsError::CalculationError("Metapool dy: x addition failed".into()))?;
-        
+        let dx_scaled = (dx * rates[i])
+            .checked_div(PRECISION)
+            .ok_or_else(|| ArbRsError::CalculationError("Metapool dy: dx_scaled failed".into()))?;
+        let x = xp[i]
+            .checked_add(dx_scaled)
+            .ok_or_else(|| ArbRsError::CalculationError("Metapool dy: x addition failed".into()))?;
+
         let is_y0 = Y_VARIANT_GROUP_0.contains(&params.pool.address);
         let is_y1 = Y_VARIANT_GROUP_1.contains(&params.pool.address);
-        let y = math::get_y(i, j, x, &xp, amp, attributes.n_coins, attributes.d_variant, is_y0, is_y1)?;
-        
+        let y = math::get_y(
+            i,
+            j,
+            x,
+            &xp,
+            amp,
+            attributes.n_coins,
+            attributes.d_variant,
+            is_y0,
+            is_y1,
+        )?;
+
         let dy = xp[j].saturating_sub(y).saturating_sub(U256::from(1));
-        let fee_amount = (dy * fee).checked_div(FEE_DENOMINATOR).ok_or_else(|| ArbRsError::CalculationError("Metapool dy: fee_amount failed".into()))?;
+        let fee_amount = (dy * fee)
+            .checked_div(FEE_DENOMINATOR)
+            .ok_or_else(|| ArbRsError::CalculationError("Metapool dy: fee_amount failed".into()))?;
         let dy_after_fee = dy.saturating_sub(fee_amount);
-        
+
         let rate_j = rates[j];
-        if rate_j.is_zero() { return Err(ArbRsError::CalculationError("Rate is zero".into())); }
-        
-        (dy_after_fee * PRECISION).checked_div(rate_j).ok_or_else(|| ArbRsError::CalculationError("Metapool dy: final division failed".into()))
+        if rate_j.is_zero() {
+            return Err(ArbRsError::CalculationError("Rate is zero".into()));
+        }
+
+        (dy_after_fee * PRECISION)
+            .checked_div(rate_j)
+            .ok_or_else(|| {
+                ArbRsError::CalculationError("Metapool dy: final division failed".into())
+            })
     }
 
     fn calculate_dx(&self, params: &SwapParams<P>, dy: U256) -> Result<U256, ArbRsError> {
@@ -177,33 +227,60 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> SwapStrategy<P> for MetapoolS
         let balances = &params.snapshot.balances;
         let fee = params.snapshot.fee;
         let amp = params.snapshot.a;
-        let virtual_price = params.snapshot.base_pool_virtual_price
-            .ok_or_else(|| ArbRsError::CalculationError("Metapool virtual price not in snapshot".to_string()))?;
+        let virtual_price = params.snapshot.base_pool_virtual_price.ok_or_else(|| {
+            ArbRsError::CalculationError("Metapool virtual price not in snapshot".to_string())
+        })?;
 
         let rates = match params.pool.address {
             STETH_USDC_METAPOOL => vec![PRECISION, virtual_price],
             RETH_ETH_METAPOOL => vec![
-                params.snapshot.scaled_redemption_price.ok_or_else(|| ArbRsError::CalculationError("Missing scaled redemption price".to_string()))?,
-                virtual_price
+                params.snapshot.scaled_redemption_price.ok_or_else(|| {
+                    ArbRsError::CalculationError("Missing scaled redemption price".to_string())
+                })?,
+                virtual_price,
             ],
             _ => vec![attributes.rates[0], virtual_price],
         };
-        
+
         let xp = math::xp(&rates, balances)?;
-        
-        let dy_plus_fee = (dy * FEE_DENOMINATOR).checked_div(FEE_DENOMINATOR.saturating_sub(fee)).ok_or_else(|| ArbRsError::CalculationError("Metapool dx: dy_plus_fee failed".into()))?;
-        let dy_scaled = (dy_plus_fee * rates[j]).checked_div(PRECISION).ok_or_else(|| ArbRsError::CalculationError("Metapool dx: dy_scaled failed".into()))?;
-        let y = xp[j].checked_sub(dy_scaled).ok_or_else(|| ArbRsError::CalculationError("Metapool dx: y subtraction failed".into()))?;
-        
+
+        let dy_plus_fee = (dy * FEE_DENOMINATOR)
+            .checked_div(FEE_DENOMINATOR.saturating_sub(fee))
+            .ok_or_else(|| {
+                ArbRsError::CalculationError("Metapool dx: dy_plus_fee failed".into())
+            })?;
+        let dy_scaled = (dy_plus_fee * rates[j])
+            .checked_div(PRECISION)
+            .ok_or_else(|| ArbRsError::CalculationError("Metapool dx: dy_scaled failed".into()))?;
+        let y = xp[j].checked_sub(dy_scaled).ok_or_else(|| {
+            ArbRsError::CalculationError("Metapool dx: y subtraction failed".into())
+        })?;
+
         let is_y0 = Y_VARIANT_GROUP_0.contains(&params.pool.address);
         let is_y1 = Y_VARIANT_GROUP_1.contains(&params.pool.address);
-        let x = math::get_y(j, i, y, &xp, amp, attributes.n_coins, attributes.d_variant, is_y0, is_y1)?;
-        
-        let dx_scaled = x.checked_sub(xp[i]).ok_or_else(|| ArbRsError::CalculationError("Metapool dx: dx_scaled subtraction failed".into()))?;
+        let x = math::get_y(
+            j,
+            i,
+            y,
+            &xp,
+            amp,
+            attributes.n_coins,
+            attributes.d_variant,
+            is_y0,
+            is_y1,
+        )?;
+
+        let dx_scaled = x.checked_sub(xp[i]).ok_or_else(|| {
+            ArbRsError::CalculationError("Metapool dx: dx_scaled subtraction failed".into())
+        })?;
         let rate_i = rates[i];
-        if rate_i.is_zero() { return Err(ArbRsError::CalculationError("Rate is zero".into())); }
-        
-        let final_dx = (dx_scaled * PRECISION).checked_div(rate_i).ok_or_else(|| ArbRsError::CalculationError("Metapool dx: final division failed".into()))?;
+        if rate_i.is_zero() {
+            return Err(ArbRsError::CalculationError("Rate is zero".into()));
+        }
+
+        let final_dx = (dx_scaled * PRECISION).checked_div(rate_i).ok_or_else(|| {
+            ArbRsError::CalculationError("Metapool dx: final division failed".into())
+        })?;
         Ok(final_dx.saturating_add(U256::from(1)))
     }
 }
@@ -230,35 +307,50 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> SwapStrategy<P> for LendingSt
         let is_y0 = Y_VARIANT_GROUP_0.contains(&params.pool.address);
         let is_y1 = Y_VARIANT_GROUP_1.contains(&params.pool.address);
         let y = math::get_y(
-            i, j, x, &xp, amp, params.pool.attributes.n_coins,
-            params.pool.attributes.d_variant, is_y0, is_y1,
+            i,
+            j,
+            x,
+            &xp,
+            amp,
+            params.pool.attributes.n_coins,
+            params.pool.attributes.d_variant,
+            is_y0,
+            is_y1,
         )?;
 
         let dy_raw = xp[j].saturating_sub(y);
 
         if LENDING_GROUP_A.contains(&params.pool.address) {
-            let fee_amount = (dy_raw * fee)
-                .checked_div(FEE_DENOMINATOR)
-                .ok_or_else(|| ArbRsError::CalculationError("Lending dy: fee_amount A failed".into()))?;
+            let fee_amount = (dy_raw * fee).checked_div(FEE_DENOMINATOR).ok_or_else(|| {
+                ArbRsError::CalculationError("Lending dy: fee_amount A failed".into())
+            })?;
             let dy_after_fee = dy_raw.saturating_sub(fee_amount);
-            if rates[j].is_zero() { return Err(ArbRsError::CalculationError("Rate is zero".into())); }
+            if rates[j].is_zero() {
+                return Err(ArbRsError::CalculationError("Rate is zero".into()));
+            }
             (dy_after_fee * PRECISION)
                 .checked_div(rates[j])
                 .ok_or_else(|| ArbRsError::CalculationError("Lending dy: final dy A failed".into()))
         } else if LENDING_GROUP_B.contains(&params.pool.address) {
-            let fee_amount = (dy_raw * fee)
-                .checked_div(FEE_DENOMINATOR)
-                .ok_or_else(|| ArbRsError::CalculationError("Lending dy: fee_amount B failed".into()))?;
+            let fee_amount = (dy_raw * fee).checked_div(FEE_DENOMINATOR).ok_or_else(|| {
+                ArbRsError::CalculationError("Lending dy: fee_amount B failed".into())
+            })?;
             Ok(dy_raw.saturating_sub(fee_amount))
         } else {
             let dy_with_margin = dy_raw.saturating_sub(U256::from(1));
-            if rates[j].is_zero() { return Err(ArbRsError::CalculationError("Rate is zero".into())); }
+            if rates[j].is_zero() {
+                return Err(ArbRsError::CalculationError("Rate is zero".into()));
+            }
             let final_dy = (dy_with_margin * PRECISION)
                 .checked_div(rates[j])
-                .ok_or_else(|| ArbRsError::CalculationError("Lending dy: final_dy else failed".into()))?;
+                .ok_or_else(|| {
+                    ArbRsError::CalculationError("Lending dy: final_dy else failed".into())
+                })?;
             let fee_amount = (final_dy * fee)
                 .checked_div(FEE_DENOMINATOR)
-                .ok_or_else(|| ArbRsError::CalculationError("Lending dy: fee_amount else failed".into()))?;
+                .ok_or_else(|| {
+                    ArbRsError::CalculationError("Lending dy: fee_amount else failed".into())
+                })?;
             Ok(final_dy.saturating_sub(fee_amount))
         }
     }
@@ -279,26 +371,35 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> SwapStrategy<P> for LendingSt
         let dy_scaled = (dy_plus_fee * rates[j])
             .checked_div(PRECISION)
             .ok_or_else(|| ArbRsError::CalculationError("Lending dx: dy_scaled failed".into()))?;
-        let y = xp[j]
-            .checked_sub(dy_scaled)
-            .ok_or_else(|| ArbRsError::CalculationError("Lending dx: y subtraction failed".into()))?;
+        let y = xp[j].checked_sub(dy_scaled).ok_or_else(|| {
+            ArbRsError::CalculationError("Lending dx: y subtraction failed".into())
+        })?;
 
         let is_y0 = Y_VARIANT_GROUP_0.contains(&params.pool.address);
         let is_y1 = Y_VARIANT_GROUP_1.contains(&params.pool.address);
         let x = math::get_y(
-            j, i, y, &xp, amp, params.pool.attributes.n_coins,
-            params.pool.attributes.d_variant, is_y0, is_y1,
+            j,
+            i,
+            y,
+            &xp,
+            amp,
+            params.pool.attributes.n_coins,
+            params.pool.attributes.d_variant,
+            is_y0,
+            is_y1,
         )?;
 
-        let dx_scaled = x
-            .checked_sub(xp[i])
-            .ok_or_else(|| ArbRsError::CalculationError("Lending dx: dx_scaled subtraction failed".into()))?;
+        let dx_scaled = x.checked_sub(xp[i]).ok_or_else(|| {
+            ArbRsError::CalculationError("Lending dx: dx_scaled subtraction failed".into())
+        })?;
         let rate_i = rates[i];
-        if rate_i.is_zero() { return Err(ArbRsError::CalculationError("Rate is zero".into())); }
+        if rate_i.is_zero() {
+            return Err(ArbRsError::CalculationError("Rate is zero".into()));
+        }
 
-        let final_dx = (dx_scaled * PRECISION)
-            .checked_div(rate_i)
-            .ok_or_else(|| ArbRsError::CalculationError("Lending dx: final_dx division failed".into()))?;
+        let final_dx = (dx_scaled * PRECISION).checked_div(rate_i).ok_or_else(|| {
+            ArbRsError::CalculationError("Lending dx: final_dx division failed".into())
+        })?;
         Ok(final_dx.saturating_add(U256::from(1)))
     }
 }
@@ -322,13 +423,23 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> SwapStrategy<P> for UnscaledS
 
         let is_y0 = Y_VARIANT_GROUP_0.contains(&params.pool.address);
         let is_y1 = Y_VARIANT_GROUP_1.contains(&params.pool.address);
-        let y = math::get_y(i, j, x, &xp, amp, attributes.n_coins, attributes.d_variant, is_y0, is_y1)?;
+        let y = math::get_y(
+            i,
+            j,
+            x,
+            &xp,
+            amp,
+            attributes.n_coins,
+            attributes.d_variant,
+            is_y0,
+            is_y1,
+        )?;
 
         let dy = xp[j].saturating_sub(y).saturating_sub(U256::from(1));
 
-        let fee_amount = (dy * fee)
-            .checked_div(FEE_DENOMINATOR)
-            .ok_or_else(|| ArbRsError::CalculationError("fee_amount division failed".to_string()))?;
+        let fee_amount = (dy * fee).checked_div(FEE_DENOMINATOR).ok_or_else(|| {
+            ArbRsError::CalculationError("fee_amount division failed".to_string())
+        })?;
 
         let final_dy = dy.saturating_sub(fee_amount);
 
@@ -344,7 +455,9 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> SwapStrategy<P> for UnscaledS
 
         let dy_plus_fee = (dy * FEE_DENOMINATOR)
             .checked_div(FEE_DENOMINATOR.saturating_sub(fee))
-            .ok_or_else(|| ArbRsError::CalculationError("dy_plus_fee division failed".to_string()))?;
+            .ok_or_else(|| {
+                ArbRsError::CalculationError("dy_plus_fee division failed".to_string())
+            })?;
 
         let y = xp[params.j]
             .checked_sub(dy_plus_fee)
@@ -352,7 +465,17 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> SwapStrategy<P> for UnscaledS
 
         let is_y0 = Y_VARIANT_GROUP_0.contains(&params.pool.address);
         let is_y1 = Y_VARIANT_GROUP_1.contains(&params.pool.address);
-        let x = math::get_y(params.j, params.i, y, &xp, amp, params.pool.attributes.n_coins, params.pool.attributes.d_variant, is_y0, is_y1)?;
+        let x = math::get_y(
+            params.j,
+            params.i,
+            y,
+            &xp,
+            amp,
+            params.pool.attributes.n_coins,
+            params.pool.attributes.d_variant,
+            is_y0,
+            is_y1,
+        )?;
 
         Ok(x.checked_sub(xp[params.i])
             .ok_or_else(|| ArbRsError::CalculationError("dx subtraction failed".to_string()))?
@@ -386,12 +509,15 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> SwapStrategy<P> for Tricrypto
 
         let balances = &snapshot.balances;
         let amp = snapshot.a;
-        let price_scale = snapshot.tricrypto_price_scale.as_ref()
-            .ok_or_else(|| ArbRsError::CalculationError("Missing tricrypto price_scale in snapshot".to_string()))?;
-        let gamma = snapshot.tricrypto_gamma
-            .ok_or_else(|| ArbRsError::CalculationError("Missing tricrypto gamma in snapshot".to_string()))?;
-        let d = snapshot.tricrypto_d
-            .ok_or_else(|| ArbRsError::CalculationError("Missing tricrypto D in snapshot".to_string()))?;
+        let price_scale = snapshot.tricrypto_price_scale.as_ref().ok_or_else(|| {
+            ArbRsError::CalculationError("Missing tricrypto price_scale in snapshot".to_string())
+        })?;
+        let gamma = snapshot.tricrypto_gamma.ok_or_else(|| {
+            ArbRsError::CalculationError("Missing tricrypto gamma in snapshot".to_string())
+        })?;
+        let d = snapshot.tricrypto_d.ok_or_else(|| {
+            ArbRsError::CalculationError("Missing tricrypto D in snapshot".to_string())
+        })?;
 
         let precisions = [
             U256::from(10).pow(U256::from(12)),
@@ -467,22 +593,42 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> SwapStrategy<P> for AdminFeeS
         let rates = &params.snapshot.rates;
 
         let xp = math::xp(rates, net_balances)?;
-        let dx_scaled = (dx * rates[i]).checked_div(PRECISION).ok_or_else(|| ArbRsError::CalculationError("dx_scaled failed".into()))?;
-        let x = xp[i].checked_add(dx_scaled).ok_or_else(|| ArbRsError::CalculationError("x addition failed".into()))?;
+        let dx_scaled = (dx * rates[i])
+            .checked_div(PRECISION)
+            .ok_or_else(|| ArbRsError::CalculationError("dx_scaled failed".into()))?;
+        let x = xp[i]
+            .checked_add(dx_scaled)
+            .ok_or_else(|| ArbRsError::CalculationError("x addition failed".into()))?;
 
         let is_y0 = Y_VARIANT_GROUP_0.contains(&params.pool.address);
         let is_y1 = Y_VARIANT_GROUP_1.contains(&params.pool.address);
 
-        let y = math::get_y(i, j, x, &xp, amp, attributes.n_coins, DVariant::Legacy, is_y0, is_y1)?;
+        let y = math::get_y(
+            i,
+            j,
+            x,
+            &xp,
+            amp,
+            attributes.n_coins,
+            DVariant::Legacy,
+            is_y0,
+            is_y1,
+        )?;
 
         let dy = xp[j].saturating_sub(y).saturating_sub(U256::from(1));
-        let fee_amount = (dy * fee).checked_div(FEE_DENOMINATOR).ok_or_else(|| ArbRsError::CalculationError("fee_amount division failed".into()))?;
+        let fee_amount = (dy * fee)
+            .checked_div(FEE_DENOMINATOR)
+            .ok_or_else(|| ArbRsError::CalculationError("fee_amount division failed".into()))?;
         let dy_after_fee = dy.saturating_sub(fee_amount);
 
         let rate_j = rates[j];
-        if rate_j.is_zero() { return Err(ArbRsError::CalculationError("Rate is zero".into())); }
-        
-        (dy_after_fee * PRECISION).checked_div(rate_j).ok_or_else(|| ArbRsError::CalculationError("final dy division failed".into()))
+        if rate_j.is_zero() {
+            return Err(ArbRsError::CalculationError("Rate is zero".into()));
+        }
+
+        (dy_after_fee * PRECISION)
+            .checked_div(rate_j)
+            .ok_or_else(|| ArbRsError::CalculationError("final dy division failed".into()))
     }
 
     fn calculate_dx(&self, params: &SwapParams<P>, dy: U256) -> Result<U256, ArbRsError> {

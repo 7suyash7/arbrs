@@ -1,13 +1,16 @@
 use crate::{
+    TokenLike, TokenManager,
     arbitrage::{
         cycle::ArbitrageCycle,
         types::{Arbitrage, ArbitragePath},
     },
     core::token::Token,
     manager::{
-        balancer_pool_manager::BalancerPoolManager, curve_pool_manager::CurvePoolManager, uniswap_v2_pool_manager::UniswapV2PoolManager, uniswap_v3_pool_manager::UniswapV3PoolManager
+        balancer_pool_manager::BalancerPoolManager, curve_pool_manager::CurvePoolManager,
+        uniswap_v2_pool_manager::UniswapV2PoolManager,
+        uniswap_v3_pool_manager::UniswapV3PoolManager,
     },
-    pool::LiquidityPool, TokenLike, TokenManager,
+    pool::LiquidityPool,
 };
 use alloy_primitives::address;
 use alloy_provider::Provider;
@@ -52,7 +55,6 @@ where
     graph
 }
 
-
 // 3-POOL CYCLE FINDER
 
 pub async fn find_three_pool_cycles<P>(
@@ -81,12 +83,15 @@ where
     let start_token = match token_manager
         .get_token(address!("C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"))
         .await
-        {
-            Ok(token) => token,
-            Err(_) => return Vec::new(), // Cannot proceed without the start token
-        };
+    {
+        Ok(token) => token,
+        Err(_) => return Vec::new(), // Cannot proceed without the start token
+    };
 
-    tracing::info!("Starting 3-pool cycle search from token: {}", start_token.symbol());
+    tracing::info!(
+        "Starting 3-pool cycle search from token: {}",
+        start_token.symbol()
+    );
 
     // Find all direct neighbors of the start_token. (Path: A -> B)
     if let Some(neighbors1) = graph.get(&start_token) {
@@ -130,12 +135,22 @@ where
             }
         }
     }
-    
+
     // Deduplicate paths that might be found in reverse
     arbitrage_paths.dedup_by(|a, b| {
-        let path_a = a.as_any().downcast_ref::<ArbitrageCycle<P>>().unwrap().path.clone();
-        let path_b = b.as_any().downcast_ref::<ArbitrageCycle<P>>().unwrap().path.clone();
-        
+        let path_a = a
+            .as_any()
+            .downcast_ref::<ArbitrageCycle<P>>()
+            .unwrap()
+            .path
+            .clone();
+        let path_b = b
+            .as_any()
+            .downcast_ref::<ArbitrageCycle<P>>()
+            .unwrap()
+            .path
+            .clone();
+
         let pools_a: Vec<_> = path_a.pools.iter().map(|p| p.address()).collect();
         let mut pools_b: Vec<_> = path_b.pools.iter().map(|p| p.address()).collect();
         pools_b.reverse();
@@ -143,8 +158,10 @@ where
         pools_a == pools_b
     });
 
-
-    tracing::info!("Found {} potential 3-pool arbitrage paths.", arbitrage_paths.len());
+    tracing::info!(
+        "Found {} potential 3-pool arbitrage paths.",
+        arbitrage_paths.len()
+    );
     arbitrage_paths
 }
 
@@ -162,8 +179,14 @@ pub fn find_two_pool_cycles<P: Provider + Send + Sync + 'static + ?Sized>(
     all_pools.extend(curve_manager.get_all_pools());
     all_pools.extend(balancer_manager.get_all_pools());
 
-    tracing::info!("Finding 2-pool cycles across {} total pools...", all_pools.len());
-    println!("Finding 2-pool cycles across {} total pools...", all_pools.len());
+    tracing::info!(
+        "Finding 2-pool cycles across {} total pools...",
+        all_pools.len()
+    );
+    println!(
+        "Finding 2-pool cycles across {} total pools...",
+        all_pools.len()
+    );
 
     let mut arbitrage_paths: Vec<Arc<dyn Arbitrage<P>>> = Vec::new();
 

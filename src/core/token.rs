@@ -8,9 +8,9 @@ use lru::LruCache;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt::{Debug, Formatter, Result as FmtResult};
+use std::hash::{Hash, Hasher};
 use std::num::NonZeroUsize;
 use std::sync::Arc;
-use std::hash::{Hash, Hasher};
 use tokio::sync::Mutex;
 
 sol!(

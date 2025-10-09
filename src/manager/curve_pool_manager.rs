@@ -5,10 +5,10 @@ use crate::{
     manager::token_manager::TokenManager,
     pool::LiquidityPool,
 };
-use alloy_primitives::{address, Address};
+use alloy_primitives::{Address, address};
 use alloy_provider::Provider;
 use alloy_rpc_types::{Filter, Log};
-use alloy_sol_types::{sol, SolEvent};
+use alloy_sol_types::{SolEvent, sol};
 use dashmap::DashMap;
 use futures::stream::{self, StreamExt};
 use std::sync::Arc;
@@ -64,7 +64,10 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> CurvePoolManager<P> {
 
         while from_block <= end_block {
             let to_block = (from_block + CHUNK_SIZE - 1).min(end_block);
-            println!("[Curve Manager] Discovering pools from {} to {}", from_block, to_block);
+            println!(
+                "[Curve Manager] Discovering pools from {} to {}",
+                from_block, to_block
+            );
 
             let event_filter = Filter::new()
                 .address(self.curve_registry.address)
@@ -125,13 +128,22 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> CurvePoolManager<P> {
         }
 
         let attributes = if let Some(json_attributes) = &record.attributes_json {
-            println!("[CACHE HIT] Loaded Curve attributes for {} from DB.", record.address);
+            println!(
+                "[CACHE HIT] Loaded Curve attributes for {} from DB.",
+                record.address
+            );
             serde_json::from_str(json_attributes)
                 .map_err(|e| ArbRsError::AbiDecodeError(e.to_string()))?
         } else {
-            println!("[CACHE MISS] Fetching Curve attributes for {} from on-chain...", record.address);
+            println!(
+                "[CACHE MISS] Fetching Curve attributes for {} from on-chain...",
+                record.address
+            );
             let tokens: Vec<_> = futures::future::join_all(
-                record.tokens.iter().map(|&addr| self.token_manager.get_token(addr)),
+                record
+                    .tokens
+                    .iter()
+                    .map(|&addr| self.token_manager.get_token(addr)),
             )
             .await
             .into_iter()
@@ -151,7 +163,10 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> CurvePoolManager<P> {
                 .update_pool_attributes(record.address, &json_attributes)
                 .await
                 .ok();
-            println!("[DB SAVE] Saved new Curve attributes for {}.", record.address);
+            println!(
+                "[DB SAVE] Saved new Curve attributes for {}.",
+                record.address
+            );
             fetched_attributes
         };
 
@@ -189,35 +204,50 @@ async fn build_new_discovered_pool<P: Provider + Send + Sync + 'static + ?Sized>
     if pool_registry.contains_key(&pool_address) {
         return Err(ArbRsError::DataFetchError(pool_address));
     }
-    
-    println!("[Curve Manager] Building new discovered pool {}", pool_address);
 
-    let tokens = CurveStableswapPool::fetch_coins(&pool_address, provider.clone(), &token_manager).await?;
-    
+    println!(
+        "[Curve Manager] Building new discovered pool {}",
+        pool_address
+    );
+
+    let tokens =
+        CurveStableswapPool::fetch_coins(&pool_address, provider.clone(), &token_manager).await?;
+
     let attributes = attributes_builder::build_attributes(
-        pool_address, 
-        &tokens, 
-        provider.clone(), 
-        &token_manager, 
-        curve_registry
-    ).await?;
+        pool_address,
+        &tokens,
+        provider.clone(),
+        &token_manager,
+        curve_registry,
+    )
+    .await?;
 
-    db_manager.save_pool(pool_address, "curve", &tokens, None, None).await.ok();
-    
+    db_manager
+        .save_pool(pool_address, "curve", &tokens, None, None)
+        .await
+        .ok();
+
     let json_attributes = serde_json::to_string(&attributes).unwrap();
-    db_manager.update_pool_attributes(pool_address, &json_attributes).await.ok();
-    println!("[DB SAVE] Saved new Curve pool and attributes for {}.", pool_address);
-    
+    db_manager
+        .update_pool_attributes(pool_address, &json_attributes)
+        .await
+        .ok();
+    println!(
+        "[DB SAVE] Saved new Curve pool and attributes for {}.",
+        pool_address
+    );
+
     let pool = Arc::new(
         CurveStableswapPool::new(
-            pool_address, 
-            provider.clone(), 
-            token_manager.clone(), 
-            curve_registry, 
-            attributes
-        ).await?
+            pool_address,
+            provider.clone(),
+            token_manager.clone(),
+            curve_registry,
+            attributes,
+        )
+        .await?,
     );
-    
+
     pool_registry.insert(pool_address, pool.clone());
     Ok(pool)
 }

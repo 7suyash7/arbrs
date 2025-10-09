@@ -1,14 +1,19 @@
-use alloy_primitives::{address, Address};
+use alloy_primitives::{Address, address};
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_transport_ws::WsConnect;
 use arbrs::{
-    arbitrage::{cache::ArbitrageCache, engine::ArbitrageEngine, finder::{find_three_pool_cycles, find_two_pool_cycles}},
+    TokenManager,
+    arbitrage::{
+        cache::ArbitrageCache,
+        engine::ArbitrageEngine,
+        finder::{find_three_pool_cycles, find_two_pool_cycles},
+    },
     db::DbManager,
     manager::{
-        curve_pool_manager::CurvePoolManager, uniswap_v2_pool_manager::UniswapV2PoolManager,
-        uniswap_v3_pool_manager::UniswapV3PoolManager, balancer_pool_manager::BalancerPoolManager,
+        balancer_pool_manager::BalancerPoolManager, curve_pool_manager::CurvePoolManager,
+        uniswap_v2_pool_manager::UniswapV2PoolManager,
+        uniswap_v3_pool_manager::UniswapV3PoolManager,
     },
-    TokenManager,
 };
 use futures::stream::StreamExt;
 use std::sync::Arc;
@@ -38,41 +43,73 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut stream = provider.subscribe_blocks().await?.into_stream();
     let provider_arc: Arc<DynProvider> = Arc::new(provider);
-    let token_manager = Arc::new(TokenManager::new(provider_arc.clone(), CHAIN_ID, db_manager.clone()));
+    let token_manager = Arc::new(TokenManager::new(
+        provider_arc.clone(),
+        CHAIN_ID,
+        db_manager.clone(),
+    ));
 
     let mut last_seen_block = provider_arc.get_block_number().await?;
-    let mut v2_pool_manager =
-        UniswapV2PoolManager::new(token_manager.clone(), provider_arc.clone(), V2_FACTORY_ADDRESS, last_seen_block);
-    let mut v3_pool_manager = UniswapV3PoolManager::new(
-        token_manager.clone(), provider_arc.clone(), CHAIN_ID, last_seen_block, V3_FACTORY_ADDRESS,
+    let mut v2_pool_manager = UniswapV2PoolManager::new(
+        token_manager.clone(),
+        provider_arc.clone(),
+        V2_FACTORY_ADDRESS,
+        last_seen_block,
     );
-    let curve_pool_manager =
-        CurvePoolManager::new(token_manager.clone(), provider_arc.clone(), last_seen_block, db_manager.clone());
-    let mut balancer_pool_manager = BalancerPoolManager::new(token_manager.clone(), provider_arc.clone(), db_manager.clone(), last_seen_block);
+    let mut v3_pool_manager = UniswapV3PoolManager::new(
+        token_manager.clone(),
+        provider_arc.clone(),
+        CHAIN_ID,
+        last_seen_block,
+        V3_FACTORY_ADDRESS,
+    );
+    let curve_pool_manager = CurvePoolManager::new(
+        token_manager.clone(),
+        provider_arc.clone(),
+        last_seen_block,
+        db_manager.clone(),
+    );
+    let mut balancer_pool_manager = BalancerPoolManager::new(
+        token_manager.clone(),
+        provider_arc.clone(),
+        db_manager.clone(),
+        last_seen_block,
+    );
 
-   tracing::info!("Hydrating pool managers from database...");
+    tracing::info!("Hydrating pool managers from database...");
     let mut successful_hydrations = 0;
     for record in &known_pools {
         tracing::debug!(address = ?record.address, dex = ?record.dex, "Processing record");
 
         let hydration_result = match record.dex.to_lowercase().as_str() {
             "uniswap v2" => {
-                v2_pool_manager.build_v2_pool(record.address, record.tokens[0], record.tokens[1], arbrs::dex::DexVariant::UniswapV2).await
-            },
+                v2_pool_manager
+                    .build_v2_pool(
+                        record.address,
+                        record.tokens[0],
+                        record.tokens[1],
+                        arbrs::dex::DexVariant::UniswapV2,
+                    )
+                    .await
+            }
             "uniswap v3" => {
                 if let (Some(fee), Some(tick_spacing)) = (record.fee, record.tick_spacing) {
-                    v3_pool_manager.build_pool(record.address, record.tokens[0], record.tokens[1], fee, tick_spacing).await
+                    v3_pool_manager
+                        .build_pool(
+                            record.address,
+                            record.tokens[0],
+                            record.tokens[1],
+                            fee,
+                            tick_spacing,
+                        )
+                        .await
                 } else {
                     tracing::warn!(?record.address, "Skipping V3 pool due to missing fee/tick_spacing");
                     continue;
                 }
-            },
-            "curve" => {
-                curve_pool_manager.build_pool_from_record(record).await
-            },
-            "balancer" => {
-                let _ = balancer_pool_manager.build_pool(record.address).await;
-            },
+            }
+            "curve" => curve_pool_manager.build_pool_from_record(record).await,
+            "balancer" => balancer_pool_manager.build_pool(record.address).await, // Corrected line
             unrecognized_dex => {
                 tracing::trace!(dex = unrecognized_dex, "Skipping unrecognized dex type");
                 continue;
@@ -89,44 +126,74 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    tracing::info!("Successfully hydrated {} of {} pools.", successful_hydrations, known_pools.len());
+    tracing::info!(
+        "Successfully hydrated {} of {} pools.",
+        successful_hydrations,
+        known_pools.len()
+    );
 
     let arbitrage_cache = Arc::new(ArbitrageCache::new());
     let arbitrage_engine = ArbitrageEngine::new(arbitrage_cache.clone());
-    
+
     println!("Finding initial arbitrage paths...");
-    let initial_paths_2_pool = find_two_pool_cycles(&v2_pool_manager, &v3_pool_manager, &curve_pool_manager, &balancer_pool_manager);
-    let initial_paths_3_pool = find_three_pool_cycles(&v2_pool_manager, &v3_pool_manager, &curve_pool_manager, &token_manager, &balancer_pool_manager).await;
+    let initial_paths_2_pool = find_two_pool_cycles(
+        &v2_pool_manager,
+        &v3_pool_manager,
+        &curve_pool_manager,
+        &balancer_pool_manager,
+    );
+    let initial_paths_3_pool = find_three_pool_cycles(
+        &v2_pool_manager,
+        &v3_pool_manager,
+        &curve_pool_manager,
+        &balancer_pool_manager,
+        &token_manager,
+    )
+    .await;
     let mut initial_paths = initial_paths_2_pool;
     initial_paths.extend(initial_paths_3_pool);
 
-    println!("Found {} potential 2- and 3-pool arbitrage paths.", initial_paths.len());
+    println!(
+        "Found {} potential 2- and 3-pool arbitrage paths.",
+        initial_paths.len()
+    );
     for path in initial_paths {
         arbitrage_cache.add_path(path).await;
     }
 
     println!("Setup complete. Listening for new blocks...");
-    
+
     while let Some(header) = stream.next().await {
         let block_number = header.number;
 
         println!("\n--- [ New Block Received: {} ] ---", block_number);
 
-        let opportunities = arbitrage_engine.find_opportunities(Some(block_number)).await;
+        let opportunities = arbitrage_engine
+            .find_opportunities(Some(block_number))
+            .await;
 
         if opportunities.is_empty() {
             println!("No profitable opportunities found in this block.");
         } else {
-            println!("[!] Found {} profitable opportunities!", opportunities.len());
+            println!(
+                "[!] Found {} profitable opportunities!",
+                opportunities.len()
+            );
             if let Some(top_opp) = opportunities.first() {
                 let profit_eth = top_opp.gross_profit.as_limbs()[0] as f64 / 1e18;
                 let input_eth = top_opp.optimal_input.as_limbs()[0] as f64 / 1e18;
-                println!("    => Top Opp: Profit {:.6} ETH from {:.4} ETH input", profit_eth, input_eth);
+                println!(
+                    "    => Top Opp: Profit {:.6} ETH from {:.4} ETH input",
+                    profit_eth, input_eth
+                );
             }
         }
 
         if block_number % 10 == 0 {
-            println!("\nChecking for new pools since block {}...", last_seen_block);
+            println!(
+                "\nChecking for new pools since block {}...",
+                last_seen_block
+            );
             let (v2_discoveries, v3_discoveries, curve_discoveries, balancer_discoveries) = tokio::join!(
                 v2_pool_manager.discover_pools_in_range(block_number),
                 v3_pool_manager.discover_pools_in_range(block_number),
@@ -141,8 +208,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             if new_pools_found {
                 println!("New pools found! Rebuilding arbitrage paths...");
-                let new_paths_2_pool = find_two_pool_cycles(&v2_pool_manager, &v3_pool_manager, &curve_pool_manager);
-                let new_paths_3_pool = find_three_pool_cycles(&v2_pool_manager, &v3_pool_manager, &curve_pool_manager, &token_manager).await;
+                let new_paths_2_pool = find_two_pool_cycles(
+                    &v2_pool_manager,
+                    &v3_pool_manager,
+                    &curve_pool_manager,
+                    &balancer_pool_manager,
+                );
+                let new_paths_3_pool = find_three_pool_cycles(
+                    &v2_pool_manager,
+                    &v3_pool_manager,
+                    &curve_pool_manager,
+                    &balancer_pool_manager,
+                    &token_manager,
+                )
+                .await;
+
                 let mut new_paths = new_paths_2_pool;
                 new_paths.extend(new_paths_3_pool);
 
@@ -150,7 +230,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 for path in new_paths {
                     arbitrage_cache.add_path(path).await;
                 }
-                println!("Updated to {} potential paths.", arbitrage_cache.paths.read().await.len());
+                println!(
+                    "Updated to {} potential paths.",
+                    arbitrage_cache.paths.read().await.len()
+                );
             } else {
                 println!("No new pools found.");
             }

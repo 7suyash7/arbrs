@@ -45,11 +45,11 @@ pub struct CurvePoolSnapshot {
     pub block_timestamp: u64,
     pub base_pool_virtual_price: Option<U256>,
     pub base_pool_lp_total_supply: Option<U256>,
-    
+
     // Data for complex strategies
-    pub rates: Vec<U256>, 
+    pub rates: Vec<U256>,
     pub admin_balances: Option<Vec<U256>>,
-    
+
     // Tricrypto-specific data
     pub tricrypto_d: Option<U256>,
     pub tricrypto_gamma: Option<U256>,

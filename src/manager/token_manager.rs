@@ -1,7 +1,7 @@
 use crate::core::token::{Erc20Data, NativeTokenData, Token};
 use crate::core::token_fetcher::TokenFetcher;
-use crate::errors::ArbRsError;
 use crate::db::DbManager;
+use crate::errors::ArbRsError;
 use alloy_primitives::{Address, address};
 use alloy_provider::Provider;
 use dashmap::DashMap;
@@ -46,7 +46,11 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> TokenManager<P> {
         }
 
         if let Ok(Some(record)) = self.db_manager.get_token_by_address(address).await {
-            tracing::debug!(?address, symbol = record.symbol, "[CACHE HIT] Loaded token from DB.");
+            tracing::debug!(
+                ?address,
+                symbol = record.symbol,
+                "[CACHE HIT] Loaded token from DB."
+            );
             let erc20_data = Erc20Data::new(
                 record.address,
                 record.symbol,

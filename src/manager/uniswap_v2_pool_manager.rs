@@ -6,10 +6,10 @@ use crate::pool::LiquidityPool;
 use alloy_primitives::Address;
 use alloy_provider::Provider;
 use dashmap::DashMap;
-use futures::{stream, StreamExt};
-use tokio::sync::Mutex;
+use futures::{StreamExt, stream};
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::Mutex;
 
 type PoolRegistry<P> = DashMap<Address, Arc<dyn LiquidityPool<P>>>;
 
@@ -54,17 +54,21 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> UniswapV2PoolManager<P> {
 
         while from_block <= end_block {
             let to_block = (from_block + CHUNK_SIZE - 1).min(end_block);
-            println!("[V2 Manager] Discovering pools from block {} to {}", from_block, to_block);
+            println!(
+                "[V2 Manager] Discovering pools from block {} to {}",
+                from_block, to_block
+            );
 
             let discovered_pools_data = discover_new_v2_pools(
                 self.provider.clone(),
                 self.factory_address,
                 from_block,
                 to_block,
-            ).await?;
+            )
+            .await?;
 
             const CONCURRENT_BUILDS: usize = 5;
-            
+
             let new_pools_in_chunk = Arc::new(Mutex::new(Vec::new()));
 
             let token_manager_clone = self.token_manager.clone();
@@ -77,7 +81,7 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> UniswapV2PoolManager<P> {
                     let provider = provider_clone.clone();
                     let pool_registry = pool_registry_clone.clone();
                     let new_pools = new_pools_in_chunk.clone();
-                    
+
                     async move {
                         if let Ok(pool) = build_and_register_v2_pool(
                             pool_registry,
@@ -87,17 +91,19 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> UniswapV2PoolManager<P> {
                             pool_data.token0,
                             pool_data.token1,
                             DexVariant::UniswapV2,
-                        ).await {
+                        )
+                        .await
+                        {
                             let mut new_pools_guard = new_pools.lock().await;
                             new_pools_guard.push(pool);
                         }
                     }
                 })
                 .await;
-            
+
             let new_pools = Arc::try_unwrap(new_pools_in_chunk).unwrap().into_inner();
             all_new_pools.extend(new_pools);
-            
+
             from_block = to_block + 1;
         }
 
@@ -189,20 +195,30 @@ async fn build_and_register_v2_pool<P: Provider + Send + Sync + 'static + ?Sized
         return Ok(pool.clone());
     }
 
-    let token0 = token_manager.get_token(if token_a < token_b { token_a } else { token_b }).await?;
-    let token1 = token_manager.get_token(if token_a < token_b { token_b } else { token_a }).await?;
+    let token0 = token_manager
+        .get_token(if token_a < token_b { token_a } else { token_b })
+        .await?;
+    let token1 = token_manager
+        .get_token(if token_a < token_b { token_b } else { token_a })
+        .await?;
 
     let pool: Arc<dyn LiquidityPool<P>> = match dex_type {
         DexVariant::UniswapV2 | DexVariant::SushiSwap => {
             Arc::new(crate::pool::uniswap_v2::UniswapV2Pool::new(
-                pool_address, token0, token1, provider, crate::pool::strategy::StandardV2Logic,
+                pool_address,
+                token0,
+                token1,
+                provider,
+                crate::pool::strategy::StandardV2Logic,
             ))
         }
-        DexVariant::PancakeSwapV2 => {
-            Arc::new(crate::pool::uniswap_v2::UniswapV2Pool::new(
-                pool_address, token0, token1, provider, crate::pool::strategy::PancakeV2Logic,
-            ))
-        }
+        DexVariant::PancakeSwapV2 => Arc::new(crate::pool::uniswap_v2::UniswapV2Pool::new(
+            pool_address,
+            token0,
+            token1,
+            provider,
+            crate::pool::strategy::PancakeV2Logic,
+        )),
     };
 
     pool_registry.insert(pool_address, pool.clone());

@@ -13,6 +13,6 @@ pub fn u256_to_f64(value: U256) -> f64 {
     result = result * TWO_POW_64 + (limbs[2] as f64);
     result = result * TWO_POW_64 + (limbs[1] as f64);
     result = result * TWO_POW_64 + (limbs[0] as f64);
-    
+
     result
 }

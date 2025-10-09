@@ -1,4 +1,6 @@
-use crate::arbitrage::{cache::ArbitrageCache, cycle::ArbitrageCycle, optimizer, types::ProfitableOpportunity};
+use crate::arbitrage::{
+    cache::ArbitrageCache, cycle::ArbitrageCycle, optimizer, types::ProfitableOpportunity,
+};
 use alloy_primitives::U256;
 use alloy_provider::Provider;
 use futures::future::join_all;
@@ -33,19 +35,21 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> ArbitrageEngine<P> {
                 unique_pools.insert(pool.address(), pool.clone());
             }
         }
-        
+
         tracing::debug!("Found {} unique pools to snapshot.", unique_pools.len());
 
-        let snapshot_futs = unique_pools.values().map(|pool| async {
-            (pool.address(), pool.get_snapshot(block_number).await)
-        });
-        
+        let snapshot_futs = unique_pools
+            .values()
+            .map(|pool| async { (pool.address(), pool.get_snapshot(block_number).await) });
+
         let snapshot_results = join_all(snapshot_futs).await;
 
         let mut snapshots = HashMap::new();
         for (address, result) in snapshot_results {
             match result {
-                Ok(snapshot) => { snapshots.insert(address, snapshot); },
+                Ok(snapshot) => {
+                    snapshots.insert(address, snapshot);
+                }
                 Err(e) => tracing::warn!(?address, "Failed to get pool snapshot: {:?}", e),
             }
         }
@@ -55,7 +59,11 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> ArbitrageEngine<P> {
             let mut opportunities = Vec::new();
 
             for (i, path) in paths_clone.iter().enumerate() {
-                if !path.get_involved_pools().iter().all(|addr| snapshots.contains_key(addr)) {
+                if !path
+                    .get_involved_pools()
+                    .iter()
+                    .all(|addr| snapshots.contains_key(addr))
+                {
                     continue;
                 }
 
@@ -71,7 +79,12 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> ArbitrageEngine<P> {
                     }
                 }
 
-                match optimizer::find_optimal_input(&path, U256::from(10).pow(U256::from(17)), U256::from(50) * U256::from(10).pow(U256::from(18)), &snapshots) {
+                match optimizer::find_optimal_input(
+                    &path,
+                    U256::from(10).pow(U256::from(17)),
+                    U256::from(50) * U256::from(10).pow(U256::from(18)),
+                    &snapshots,
+                ) {
                     Ok((optimal_input, gross_profit)) => {
                         if gross_profit > U256::ZERO {
                             opportunities.push(ProfitableOpportunity {
@@ -79,12 +92,12 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> ArbitrageEngine<P> {
                                 optimal_input,
                                 gross_profit,
                             });
-                            
+
                             // Use the correct variable `path` to downcast
                             if let Some(cycle) = path.as_any().downcast_ref::<ArbitrageCycle<P>>() {
                                 println!("Profitable path details: {:?}", cycle.path);
                             }
-                            
+
                             // Use the correct `println!` syntax with {} placeholders
                             println!(
                                 "Found profitable opportunity! path_index: {}, profit: {}, input: {}",

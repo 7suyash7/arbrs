@@ -1,10 +1,10 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
+use crate::TokenLike;
+use crate::core::token::Token;
 use alloy_primitives::Address;
 use alloy_provider::Provider;
-use crate::core::token::Token;
-use crate::TokenLike;
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use sqlx::{Row, Transaction};
 
@@ -33,7 +33,10 @@ pub struct TokenRecord {
 
 impl DbManager {
     pub async fn new(db_url: &str) -> Result<Self, sqlx::Error> {
-        let pool = SqlitePoolOptions::new().max_connections(5).connect(db_url).await?;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(5)
+            .connect(db_url)
+            .await?;
         Ok(Self { pool })
     }
 
@@ -82,7 +85,7 @@ impl DbManager {
         tx.commit().await?;
         Ok(())
     }
-    
+
     async fn save_token_in_tx<'a, P: Provider + Send + Sync + 'static + ?Sized>(
         &self,
         token: &Token<P>,
@@ -120,7 +123,9 @@ impl DbManager {
                 dex: row.get("dex"),
                 tokens,
                 fee: row.get::<Option<i64>, _>("fee").map(|f| f as u32),
-                tick_spacing: row.get::<Option<i64>, _>("tick_spacing").map(|ts| ts as i32),
+                tick_spacing: row
+                    .get::<Option<i64>, _>("tick_spacing")
+                    .map(|ts| ts as i32),
                 attributes_json: row.get("attributes_json"), // <-- POPULATE THE NEW FIELD
             });
         }

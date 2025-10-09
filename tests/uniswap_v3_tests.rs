@@ -4,11 +4,11 @@ use alloy_primitives::{Address, I256, U256, address};
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types::TransactionRequest;
 use alloy_sol_types::SolCall;
+use arbrs::TokenLike;
 use arbrs::db::DbManager;
-use arbrs::pool::{LiquidityPool, PoolSnapshot};
 use arbrs::pool::uniswap_v3::UniswapV3Pool;
 use arbrs::pool::uniswap_v3::{TickInfo, UniswapV3PoolState};
-use arbrs::TokenLike;
+use arbrs::pool::{LiquidityPool, PoolSnapshot};
 use arbrs::{
     TokenManager,
     math::v3::{
@@ -44,11 +44,19 @@ sol! {
     }
 }
 
-async fn setup() -> (Arc<DynProvider>, Arc<DbManager>, Arc<TokenManager<DynProvider>>) {
+async fn setup() -> (
+    Arc<DynProvider>,
+    Arc<DbManager>,
+    Arc<TokenManager<DynProvider>>,
+) {
     let provider = ProviderBuilder::new().connect_http(FORK_RPC_URL.parse().unwrap());
     let provider_arc: Arc<DynProvider> = Arc::new(provider);
     let db_manager = Arc::new(DbManager::new(DB_URL).await.unwrap());
-    let token_manager = Arc::new(TokenManager::new(provider_arc.clone(), 1, db_manager.clone()));
+    let token_manager = Arc::new(TokenManager::new(
+        provider_arc.clone(),
+        1,
+        db_manager.clone(),
+    ));
     (provider_arc, db_manager, token_manager)
 }
 
@@ -299,21 +307,33 @@ async fn test_v3_swap_calculations() {
     let (provider, _db, token_manager) = setup().await;
     let weth = token_manager.get_token(WETH_ADDRESS).await.unwrap();
     let wbtc = token_manager.get_token(WBTC_ADDRESS).await.unwrap();
-    
-    let pool = UniswapV3Pool::new(WBTC_WETH_V3_POOL_ADDRESS, wbtc.clone(), weth.clone(), 3000, 60, provider.clone(), None);
+
+    let pool = UniswapV3Pool::new(
+        WBTC_WETH_V3_POOL_ADDRESS,
+        wbtc.clone(),
+        weth.clone(),
+        3000,
+        60,
+        provider.clone(),
+        None,
+    );
 
     let snapshot = pool.get_snapshot(Some(TEST_BLOCK)).await.unwrap();
 
     let amount_in_wbtc = U256::from(10_000_000);
-    let local_amount_out_weth = pool.calculate_tokens_out(&wbtc, &weth, amount_in_wbtc, &snapshot).unwrap();
+    let local_amount_out_weth = pool
+        .calculate_tokens_out(&wbtc, &weth, amount_in_wbtc, &snapshot)
+        .unwrap();
 
     let expected_weth_out = U256::from_str("1667334070818084965").unwrap();
     assert_eq!(local_amount_out_weth, expected_weth_out);
 
     let amount_in_weth = U256::from(10).pow(U256::from(18));
-    let local_amount_out_wbtc = pool.calculate_tokens_out(&weth, &wbtc, amount_in_weth, &snapshot).unwrap();
+    let local_amount_out_wbtc = pool
+        .calculate_tokens_out(&weth, &wbtc, amount_in_weth, &snapshot)
+        .unwrap();
 
-    let expected_wbtc_out = U256::from(5961624); 
+    let expected_wbtc_out = U256::from(5961624);
     assert_eq!(local_amount_out_wbtc, expected_wbtc_out);
 }
 
@@ -322,7 +342,15 @@ async fn test_v3_exchange_rate_from_sqrt_price() {
     let (_provider, _db, token_manager) = setup().await;
     let weth = token_manager.get_token(WETH_ADDRESS).await.unwrap();
     let wbtc = token_manager.get_token(WBTC_ADDRESS).await.unwrap();
-    let pool = UniswapV3Pool::new(WBTC_WETH_V3_POOL_ADDRESS, wbtc.clone(), weth.clone(), 3000, 60, _provider, None);
+    let pool = UniswapV3Pool::new(
+        WBTC_WETH_V3_POOL_ADDRESS,
+        wbtc.clone(),
+        weth.clone(),
+        3000,
+        60,
+        _provider,
+        None,
+    );
 
     pool.update_state_at_block(TEST_BLOCK).await.unwrap();
 
@@ -341,33 +369,65 @@ async fn test_v3_swap_calculations_match_quoter() {
     let (provider, _db, token_manager) = setup().await;
     let weth = token_manager.get_token(WETH_ADDRESS).await.unwrap();
     let wbtc = token_manager.get_token(WBTC_ADDRESS).await.unwrap();
-    let pool = UniswapV3Pool::new(WBTC_WETH_V3_POOL_ADDRESS, wbtc.clone(), weth.clone(), 3000, 60, provider.clone(), None);
+    let pool = UniswapV3Pool::new(
+        WBTC_WETH_V3_POOL_ADDRESS,
+        wbtc.clone(),
+        weth.clone(),
+        3000,
+        60,
+        provider.clone(),
+        None,
+    );
 
     let snapshot = pool.get_snapshot(Some(TEST_BLOCK)).await.unwrap();
 
     let amount_in_wbtc = U256::from(10_000_000);
-    let local_amount_out_weth = pool.calculate_tokens_out(&wbtc, &weth, amount_in_wbtc, &snapshot).unwrap();
-    
+    let local_amount_out_weth = pool
+        .calculate_tokens_out(&wbtc, &weth, amount_in_wbtc, &snapshot)
+        .unwrap();
+
     let quoter_call = IQuoter::quoteExactInputSingleCall {
-        tokenIn: wbtc.address(), tokenOut: weth.address(), fee: U24::from(3000),
-        amountIn: amount_in_wbtc, sqrtPriceLimitX96: U160::ZERO,
+        tokenIn: wbtc.address(),
+        tokenOut: weth.address(),
+        fee: U24::from(3000),
+        amountIn: amount_in_wbtc,
+        sqrtPriceLimitX96: U160::ZERO,
     };
-    let request = TransactionRequest::default().to(QUOTER_ADDRESS).input(quoter_call.abi_encode().into());
-    let result_bytes = provider.call(request).block(TEST_BLOCK.into()).await.unwrap();
-    let onchain_amount_out_weth = IQuoter::quoteExactInputSingleCall::abi_decode_returns(&result_bytes).unwrap();
+    let request = TransactionRequest::default()
+        .to(QUOTER_ADDRESS)
+        .input(quoter_call.abi_encode().into());
+    let result_bytes = provider
+        .call(request)
+        .block(TEST_BLOCK.into())
+        .await
+        .unwrap();
+    let onchain_amount_out_weth =
+        IQuoter::quoteExactInputSingleCall::abi_decode_returns(&result_bytes).unwrap();
 
     assert_eq!(local_amount_out_weth, onchain_amount_out_weth);
 
     let amount_in_weth = U256::from(10).pow(U256::from(18));
-    let local_amount_out_wbtc = pool.calculate_tokens_out(&weth, &wbtc, amount_in_weth, &snapshot).unwrap();
+    let local_amount_out_wbtc = pool
+        .calculate_tokens_out(&weth, &wbtc, amount_in_weth, &snapshot)
+        .unwrap();
 
     let quoter_call_2 = IQuoter::quoteExactInputSingleCall {
-        tokenIn: weth.address(), tokenOut: wbtc.address(), fee: U24::from(3000),
-        amountIn: amount_in_weth, sqrtPriceLimitX96: U160::ZERO,
+        tokenIn: weth.address(),
+        tokenOut: wbtc.address(),
+        fee: U24::from(3000),
+        amountIn: amount_in_weth,
+        sqrtPriceLimitX96: U160::ZERO,
     };
-    let request_2 = TransactionRequest::default().to(QUOTER_ADDRESS).input(quoter_call_2.abi_encode().into());
-    let result_bytes_2 = provider.call(request_2).block(TEST_BLOCK.into()).await.unwrap();
-    let onchain_amount_out_wbtc = IQuoter::quoteExactInputSingleCall::abi_decode_returns(&result_bytes_2).unwrap();
+    let request_2 = TransactionRequest::default()
+        .to(QUOTER_ADDRESS)
+        .input(quoter_call_2.abi_encode().into());
+    let result_bytes_2 = provider
+        .call(request_2)
+        .block(TEST_BLOCK.into())
+        .await
+        .unwrap();
+    let onchain_amount_out_wbtc =
+        IQuoter::quoteExactInputSingleCall::abi_decode_returns(&result_bytes_2).unwrap();
 
     assert_eq!(local_amount_out_wbtc, onchain_amount_out_wbtc);
 }
@@ -377,7 +437,15 @@ async fn test_v3_simulations() {
     let (provider, _db, token_manager) = setup().await;
     let weth = token_manager.get_token(WETH_ADDRESS).await.unwrap();
     let wbtc = token_manager.get_token(WBTC_ADDRESS).await.unwrap();
-    let pool = UniswapV3Pool::new(WBTC_WETH_V3_POOL_ADDRESS, wbtc.clone(), weth.clone(), 3000, 60, provider.clone(), None);
+    let pool = UniswapV3Pool::new(
+        WBTC_WETH_V3_POOL_ADDRESS,
+        wbtc.clone(),
+        weth.clone(),
+        3000,
+        60,
+        provider.clone(),
+        None,
+    );
 
     let snapshot = match pool.get_snapshot(Some(TEST_BLOCK)).await.unwrap() {
         PoolSnapshot::UniswapV3(s) => s,
@@ -385,9 +453,18 @@ async fn test_v3_simulations() {
     };
 
     let amount_in_wbtc = U256::from(100_000_000);
-    let sim_result = pool.simulate_exact_input_swap(&wbtc, &weth, amount_in_wbtc, &snapshot).unwrap();
+    let sim_result = pool
+        .simulate_exact_input_swap(&wbtc, &weth, amount_in_wbtc, &snapshot)
+        .unwrap();
 
-    let expected_weth_out = pool.calculate_tokens_out(&wbtc, &weth, amount_in_wbtc, &PoolSnapshot::UniswapV3(snapshot.clone())).unwrap();
+    let expected_weth_out = pool
+        .calculate_tokens_out(
+            &wbtc,
+            &weth,
+            amount_in_wbtc,
+            &PoolSnapshot::UniswapV3(snapshot.clone()),
+        )
+        .unwrap();
     assert_eq!(sim_result.amount0_delta, I256::from_raw(amount_in_wbtc));
     assert_eq!(sim_result.amount1_delta, -I256::from_raw(expected_weth_out));
 }

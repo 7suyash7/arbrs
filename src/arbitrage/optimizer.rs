@@ -1,8 +1,4 @@
-use crate::{
-    arbitrage::types::Arbitrage,
-    errors::ArbRsError,
-    pool::PoolSnapshot,
-};
+use crate::{arbitrage::types::Arbitrage, errors::ArbRsError, pool::PoolSnapshot};
 use alloy_primitives::{Address, U256};
 use alloy_provider::Provider;
 use std::{collections::HashMap, sync::Arc};

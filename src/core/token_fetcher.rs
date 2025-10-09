@@ -37,7 +37,7 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> TokenFetcher<P> {
                 return Err(ArbRsError::TokenStandardError(
                     address,
                     "Failed to fetch decimals".to_string(),
-                ))
+                ));
             }
         };
 
@@ -61,9 +61,13 @@ impl<P: Provider + Send + Sync + 'static + ?Sized> TokenFetcher<P> {
             input: Some(Bytes::from(call.abi_encode())).into(),
             ..Default::default()
         };
-        
-        let result_bytes = self.provider.call(request).await.map_err(|e| ArbRsError::ProviderError(e.to_string()))?;
-        
+
+        let result_bytes = self
+            .provider
+            .call(request)
+            .await
+            .map_err(|e| ArbRsError::ProviderError(e.to_string()))?;
+
         decimalsCall::abi_decode_returns(&result_bytes)
             .map_err(|e| ArbRsError::AbiDecodeError(e.to_string()))
     }
