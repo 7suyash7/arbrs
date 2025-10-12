@@ -13,7 +13,6 @@ use alloy_rpc_types::{BlockId, TransactionRequest};
 use alloy_sol_types::{SolCall, sol};
 use async_trait::async_trait;
 use balancer_maths_rust::common::maths::{div_down_fixed, div_up_fixed, mul_down_fixed};
-use balancer_maths_rust::common::maths::mul_up_fixed;
 use balancer_maths_rust::common::maths::pow_up_fixed;
 use balancer_maths_rust::common::maths::complement_fixed;
 use num_bigint::BigInt;
