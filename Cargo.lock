@@ -720,6 +720,7 @@ dependencies = [
  "alloy-transport-ws",
  "async-recursion",
  "async-trait",
+ "balancer-maths-rust",
  "dashmap",
  "futures",
  "itertools 0.14.0",
@@ -1045,6 +1046,19 @@ dependencies = [
  "object",
  "rustc-demangle",
  "windows-targets 0.52.6",
+]
+
+[[package]]
+name = "balancer-maths-rust"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9bd7cf08fe56a163609c527bb13c6047df82dd7beae5802612176ecd29fb7f09"
+dependencies = [
+ "lazy_static",
+ "num-bigint",
+ "num-traits",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2642,6 +2656,7 @@ checksum = "a5e44f723f1133c9deac646763579fdb3ac745e418f2a7af9cd0c431da1f20b9"
 dependencies = [
  "num-integer",
  "num-traits",
+ "serde",
 ]
 
 [[package]]

@@ -1,6 +1,7 @@
 use alloy::transports::{RpcError, TransportErrorKind};
 use alloy_contract::Error as ContractError;
 use alloy_primitives::Address;
+use balancer_maths_rust::PoolError;
 use thiserror::Error;
 
 #[derive(Error, Debug, PartialEq)]
@@ -53,5 +54,11 @@ impl From<RpcError<TransportErrorKind>> for ArbRsError {
 impl From<ContractError> for ArbRsError {
     fn from(error: ContractError) -> Self {
         ArbRsError::ContractError(error.to_string())
+    }
+}
+
+impl From<PoolError> for ArbRsError {
+    fn from(error: PoolError) -> Self {
+        ArbRsError::CalculationError(format!("Balancer V3 Math Error: {:?}", error))
     }
 }

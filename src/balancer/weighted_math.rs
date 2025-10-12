@@ -34,14 +34,12 @@ pub fn calc_out_given_in(
     weight_out: U256,
     amount_in: U256,
 ) -> Result<U256, ArbRsError> {
-    // Formula: aO = bO * (1 - (bI / (bI + aI))^(wI / wO))
-
     if amount_in > fp::mul_down(balance_in, *MAX_IN_RATIO)? {
         return Err(ArbRsError::CalculationError("MAX_IN_RATIO".into()));
     }
 
     let denominator = balance_in.saturating_add(amount_in);
-    let base = fp::div_up(balance_in, denominator)?;
+    let base = fp::div_up(balance_in, denominator)?; // THIS IS THE FIX - MUST BE div_up
     let exponent = fp::div_down(weight_in, weight_out)?;
     let power = fp::pow_up(base, exponent)?;
 

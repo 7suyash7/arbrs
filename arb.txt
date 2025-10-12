@@ -1,0 +1,43 @@
+Of course. That's a great question, and it's smart to look at the original before we build our version. I've reviewed the `degenbot` source code you sent. Here’s the breakdown of how its arbitrage engine works and what we're building.
+
+### How the `degenbot` Arbitrage Engine Works
+
+The `degenbot` arbitrage engine is not a single, monolithic entity. It's a collection of **specialized arbitrage finder classes**, each designed to identify a specific *shape* of arbitrage opportunity.
+
+You can find these in the `degenbot/arbitrage/` directory. Each class, like `Uniswap2PoolCycle`, inherits from a base `Arbitrage` class and shares a core piece of logic: the `_calculate_arbitrage` method.
+
+Here's the core workflow:
+
+1.  **Find a Path:** The bot identifies a potential cycle (e.g., two Uniswap pools that both trade WETH and USDC).
+2.  **Initial Calculation:** It calculates the output of a swap with a **fixed initial amount** (e.g., 1 WETH) to see if there's any profit at all. This is a quick check to discard obviously unprofitable paths.
+3.  **Find the Optimal Amount (The "Math"):** This is the clever part. If the initial check shows a profit, the bot **does not** just take that trade. It knows that the best profit might be at a different trade size. It uses an iterative optimization algorithm to find the "peak" of the profit curve.
+
+    * It starts with a `step` size (e.g., 0.1 ETH).
+    * It calculates the profit for `(initial_amount + step)`.
+    * If the profit is *higher*, it keeps adding the `step` amount and re-calculating.
+    * If the profit is *lower*, it knows it has gone too far. It then reduces the `step` size (e.g., to 0.01 ETH) and starts coming back down.
+    * This process repeats, narrowing down the `step` size until it hones in on the optimal trade amount that yields the absolute maximum profit for that specific path at that specific moment.
+
+We are currently building the first part of this: the pathfinding and the initial profit calculation. The optimization algorithm will be part of our **Phase 3**.
+
+### How Many Arbitrage Cycles Does `degenbot` Have?
+
+Looking at the source code, `degenbot` has several distinct arbitrage strategies implemented. Here are the main ones:
+
+* **`Uniswap2PoolCycle` (`uniswap_2pool_cycle.py`):** This is the most fundamental strategy and the one we are building first. It finds simple `A -> B -> A` cycles between any two pools that share two common tokens. This can be between two Uniswap V2 pools, a V2 and a V3, or any other combination.
+
+* **`UniswapMultipoolCycle` (`uniswap_multipool_cycle.py`):** This is more advanced. It finds longer cycles of `A -> B -> C -> A` across three or more pools. This is much more computationally intensive to find but can uncover opportunities that 2-pool cycles miss.
+
+* **`UniswapCurveCycle` (`uniswap_curve_cycle.py`):** A specialized 2-pool finder that specifically looks for cycles between a Uniswap-like pool and a Curve pool. It has some extra logic to handle the nuances of Curve's stableswap math.
+
+* **`UniswapLPCycle` (`uniswap_lp_cycle.py`):** This is a very different and clever type of arbitrage. Instead of just swapping tokens, it looks for opportunities where it's profitable to:
+    1.  Add liquidity to a Uniswap pool with one token.
+    2.  Immediately withdraw that liquidity, specifying you want to be paid out in the *other* token.
+    3.  Swap the second token back to the first.
+    This is often called "zap" arbitrage and exploits imbalances in the pool's reserves.
+
+So, to summarize, we are currently building the foundation that will support all of these, starting with the `Uniswap2PoolCycle` model. Once that's working, we'll have a solid base to build out the more complex strategies like multi-pool and LP cycle arbitrage.
+
+You're on the perfect track. Let's get back to it!
+
+const FORK_RPC_URL: &str = "wss://mainnet.infura.io/ws/v3/16c991f6269343d19e2ffa6cdb75c4ed
