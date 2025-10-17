@@ -37,10 +37,10 @@ pub struct UniswapV2PoolSnapshot {
 
 pub struct UniswapV2Pool<P: ?Sized, S: V2CalculationStrategy> {
     address: Address,
-    token0: Arc<Token<P>>,
+    pub token0: Arc<Token<P>>,
     token1: Arc<Token<P>>,
     state: RwLock<UniswapV2PoolState>,
-    provider: Arc<P>,
+    pub provider: Arc<P>,
     strategy: S,
     state_cache: RwLock<BTreeMap<u64, UniswapV2PoolState>>,
     subscribers: RwLock<Vec<Weak<dyn Subscriber<P>>>>,

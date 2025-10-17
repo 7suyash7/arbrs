@@ -12,13 +12,20 @@ use crate::{
     },
     pool::LiquidityPool,
 };
-use alloy_primitives::address;
+use alloy_primitives::{address, Address};
 use alloy_provider::Provider;
 use itertools::Itertools;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     sync::Arc,
 };
+
+#[derive(Debug, Clone)]
+struct PathInSearch<P: Provider + Send + Sync + 'static + ?Sized> {
+    pub pools: Vec<Arc<dyn LiquidityPool<P>>>,
+    pub tokens: Vec<Arc<Token<P>>>,
+    pub current_token: Arc<Token<P>>, 
+}
 
 #[derive(Clone, Debug)]
 pub struct PoolNeighbor<P: Provider + Send + Sync + 'static + ?Sized> {
@@ -55,7 +62,42 @@ where
     graph
 }
 
-// 3-POOL CYCLE FINDER
+fn get_canonical_cycle_path<P>(pools: &[Arc<dyn LiquidityPool<P>>]) -> Vec<Address>
+where
+    P: Provider + Send + Sync + 'static + ?Sized,
+{
+    let addresses: Vec<Address> = pools.iter().map(|p| p.address()).collect();
+    let n = addresses.len();
+
+    if n == 0 {
+        return Vec::new();
+    }
+
+    let mut canonical = addresses.clone();
+
+    let mut min_index = 0;
+    for i in 1..n {
+        if addresses[i] < addresses[min_index] {
+            min_index = i;
+        }
+    }
+
+    let mut normalized = Vec::with_capacity(n);
+    for i in 0..n {
+        normalized.push(addresses[(min_index + i) % n]);
+    }
+
+    let mut reversed = normalized.clone();
+    reversed.reverse();
+
+    if reversed < normalized {
+        canonical = reversed;
+    } else {
+        canonical = normalized;
+    }
+
+    canonical
+}
 
 pub async fn find_three_pool_cycles<P>(
     v2_manager: &UniswapV2PoolManager<P>,
@@ -63,6 +105,28 @@ pub async fn find_three_pool_cycles<P>(
     curve_manager: &CurvePoolManager<P>,
     balancer_manager: &BalancerPoolManager<P>,
     token_manager: &TokenManager<P>,
+) -> Vec<Arc<dyn Arbitrage<P>>>
+where
+    P: Provider + Send + Sync + 'static + ?Sized,
+{
+    find_multi_hop_cycles(
+        v2_manager,
+        v3_manager,
+        curve_manager,
+        balancer_manager,
+        token_manager,
+        3,
+    )
+    .await
+}
+
+pub async fn find_multi_hop_cycles<P>(
+    v2_manager: &UniswapV2PoolManager<P>,
+    v3_manager: &UniswapV3PoolManager<P>,
+    curve_manager: &CurvePoolManager<P>,
+    balancer_manager: &BalancerPoolManager<P>,
+    token_manager: &TokenManager<P>,
+    max_hops: usize,
 ) -> Vec<Arc<dyn Arbitrage<P>>>
 where
     P: Provider + Send + Sync + 'static + ?Sized,
@@ -80,87 +144,79 @@ where
     let graph = build_graph(all_pools);
     let mut arbitrage_paths: Vec<Arc<dyn Arbitrage<P>>> = Vec::new();
 
+    let mut canonical_cycles: HashSet<Vec<Address>> = HashSet::new(); 
+
     let start_token = match token_manager
         .get_token(address!("C02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"))
         .await
     {
         Ok(token) => token,
-        Err(_) => return Vec::new(), // Cannot proceed without the start token
+        Err(_) => return Vec::new(),
     };
 
-    tracing::info!(
-        "Starting 3-pool cycle search from token: {}",
-        start_token.symbol()
-    );
+    let mut queue: VecDeque<PathInSearch<P>> = VecDeque::new();
 
-    // Find all direct neighbors of the start_token. (Path: A -> B)
-    if let Some(neighbors1) = graph.get(&start_token) {
-        for neighbor1 in neighbors1 {
-            let pool1 = &neighbor1.pool;
-            let token1 = &neighbor1.token;
+    if let Some(neighbors) = graph.get(&start_token) {
+        for neighbor in neighbors {
+            let path = PathInSearch {
+                pools: vec![neighbor.pool.clone()],
+                tokens: vec![start_token.clone(), neighbor.token.clone()],
+                current_token: neighbor.token.clone(),
+            };
+            queue.push_back(path);
+        }
+    }
 
-            // From each neighbor, find *their* neighbors. (Path: A -> B -> C)
-            if let Some(neighbors2) = graph.get(token1) {
-                for neighbor2 in neighbors2 {
-                    let pool2 = &neighbor2.pool;
-                    let token2 = &neighbor2.token;
+    while let Some(current_path) = queue.pop_front() {
+        let current_hop = current_path.pools.len();
 
-                    // Avoid going immediately back (A -> B -> A)
-                    if token2.address() == start_token.address() {
-                        continue;
-                    }
+        if current_hop >= max_hops { 
+            continue;
+        }
 
-                    // LEVEL 3: From the new token, check if it can swap back to the start. (Path: A -> B -> C -> A)
-                    if let Some(neighbors3) = graph.get(token2) {
-                        for neighbor3 in neighbors3 {
-                            if neighbor3.token.address() == start_token.address() {
-                                let pool3 = &neighbor3.pool;
+        if let Some(neighbors) = graph.get(&current_path.current_token) {
+            for neighbor in neighbors {
+                let next_token = &neighbor.token;
+                let next_pool = &neighbor.pool;
 
-                                // CYCLE DETECTED!
-                                let path = ArbitragePath {
-                                    pools: vec![pool1.clone(), pool2.clone(), pool3.clone()],
-                                    path: vec![
-                                        start_token.clone(),
-                                        token1.clone(),
-                                        token2.clone(),
-                                        start_token.clone(),
-                                    ],
-                                    profit_token: start_token.clone(),
-                                };
-                                arbitrage_paths.push(Arc::new(ArbitrageCycle::new(path)));
-                            }
+                if next_token.address() == start_token.address() {
+                    let new_pools = [current_path.pools.clone(), vec![next_pool.clone()]].concat();
+                    let new_tokens = [current_path.tokens.clone(), vec![start_token.clone()]].concat();
+
+                    if new_pools.len() >= 2 {
+                        let canonical = get_canonical_cycle_path(&new_pools);
+                        
+                        if !canonical_cycles.contains(&canonical) {
+                            canonical_cycles.insert(canonical);
+
+                            let arbitrage_path = ArbitragePath {
+                                pools: new_pools,
+                                path: new_tokens,
+                                profit_token: start_token.clone(),
+                            };
+                            
+                            arbitrage_paths.push(Arc::new(ArbitrageCycle::new(arbitrage_path)));
                         }
+                    }
+                }
+                else {
+                    let previous_token = &current_path.tokens[current_path.tokens.len() - 2];
+                    if next_token.address() != previous_token.address() {
+                        let next_path = PathInSearch {
+                            pools: [current_path.pools.clone(), vec![next_pool.clone()]].concat(),
+                            tokens: [current_path.tokens.clone(), vec![next_token.clone()]].concat(),
+                            current_token: next_token.clone(),
+                        };
+                        queue.push_back(next_path);
                     }
                 }
             }
         }
     }
-
-    // Deduplicate paths that might be found in reverse
-    arbitrage_paths.dedup_by(|a, b| {
-        let path_a = a
-            .as_any()
-            .downcast_ref::<ArbitrageCycle<P>>()
-            .unwrap()
-            .path
-            .clone();
-        let path_b = b
-            .as_any()
-            .downcast_ref::<ArbitrageCycle<P>>()
-            .unwrap()
-            .path
-            .clone();
-
-        let pools_a: Vec<_> = path_a.pools.iter().map(|p| p.address()).collect();
-        let mut pools_b: Vec<_> = path_b.pools.iter().map(|p| p.address()).collect();
-        pools_b.reverse();
-
-        pools_a == pools_b
-    });
-
+    
     tracing::info!(
-        "Found {} potential 3-pool arbitrage paths.",
-        arbitrage_paths.len()
+        "Found {} unique multi-hop arbitrage paths (up to {} hops).",
+        arbitrage_paths.len(), max_hops
     );
     arbitrage_paths
 }

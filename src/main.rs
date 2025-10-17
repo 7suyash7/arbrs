@@ -2,24 +2,20 @@ use alloy_primitives::{Address, address};
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_transport_ws::WsConnect;
 use arbrs::{
-    TokenManager,
     arbitrage::{
         cache::ArbitrageCache,
         engine::ArbitrageEngine,
-        finder::{find_three_pool_cycles, find_two_pool_cycles},
-    },
-    db::DbManager,
-    manager::{
+        finder::find_multi_hop_cycles,
+    }, db::DbManager, manager::{
         balancer_pool_manager::BalancerPoolManager, curve_pool_manager::CurvePoolManager,
         uniswap_v2_pool_manager::UniswapV2PoolManager,
         uniswap_v3_pool_manager::UniswapV3PoolManager,
-    },
+    }, TokenLike, TokenManager
 };
 use futures::stream::StreamExt;
 use std::sync::Arc;
 
-// const FORK_RPC_URL: &str = "ws://127.0.0.1:8545";
-const FORK_RPC_URL: &str = "wss://mainnet.infura.io/ws/v3/";
+const FORK_RPC_URL: &str = "ws://127.0.0.1:8545";
 const DB_URL: &str = "sqlite:arbrs.db";
 const CHAIN_ID: u64 = 1;
 const V2_FACTORY_ADDRESS: Address = address!("5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f");
@@ -133,29 +129,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let arbitrage_cache = Arc::new(ArbitrageCache::new());
-    let arbitrage_engine = ArbitrageEngine::new(arbitrage_cache.clone());
+    let arbitrage_engine = ArbitrageEngine::new(
+        arbitrage_cache.clone(),
+        token_manager.clone(),
+        provider_arc.clone(),
+    );
 
     println!("Finding initial arbitrage paths...");
-    let initial_paths_2_pool = find_two_pool_cycles(
-        &v2_pool_manager,
-        &v3_pool_manager,
-        &curve_pool_manager,
-        &balancer_pool_manager,
-    );
-    let initial_paths_3_pool = find_three_pool_cycles(
+
+    let max_hops: usize = 5; 
+    let initial_paths = find_multi_hop_cycles(
         &v2_pool_manager,
         &v3_pool_manager,
         &curve_pool_manager,
         &balancer_pool_manager,
         &token_manager,
+        max_hops,
     )
     .await;
-    let mut initial_paths = initial_paths_2_pool;
-    initial_paths.extend(initial_paths_3_pool);
 
     println!(
-        "Found {} potential 2- and 3-pool arbitrage paths.",
-        initial_paths.len()
+        "Found {} potential arbitrage paths (up to {} hops).", 
+        initial_paths.len(),
+        max_hops
     );
     for path in initial_paths {
         arbitrage_cache.add_path(path).await;
@@ -176,16 +172,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("No profitable opportunities found in this block.");
         } else {
             println!(
-                "[!] Found {} profitable opportunities!",
+                "[!] Found {} profitable opportunities! (Scored by Max Net Profit)",
                 opportunities.len()
             );
             if let Some(top_opp) = opportunities.first() {
-                let profit_eth = top_opp.gross_profit.as_limbs()[0] as f64 / 1e18;
+                let profit_pool_ref = top_opp.path.get_pools().first().unwrap();
+                let profit_token_arc = profit_pool_ref.get_all_tokens().first().unwrap().clone();
+                let profit_token_symbol = profit_token_arc.symbol(); 
+
+                let net_profit_f64 = top_opp.net_profit.as_limbs()[0] as f64 / 1e18;
                 let input_eth = top_opp.optimal_input.as_limbs()[0] as f64 / 1e18;
                 println!(
-                    "    => Top Opp: Profit {:.6} ETH from {:.4} ETH input",
-                    profit_eth, input_eth
+                    "    => Top Opp: NET Profit {:.6} {} from {:.4} {} input",
+                    net_profit_f64, profit_token_symbol, input_eth, profit_token_symbol
                 );
+
+                if let (Some(first_action), Some(last_action)) = (top_opp.swap_actions.first(), top_opp.swap_actions.last()) {
+                    let token_in_symbol = first_action.token_in.symbol();
+                    let token_out_symbol = last_action.token_out.symbol();
+                    
+                    println!("    => Hop 1: {:.4} {} -> {:.4} {} @ {}", 
+                        first_action.amount_in.as_limbs()[0] as f64 / 1e18, 
+                        token_in_symbol,
+                        first_action.min_amount_out.as_limbs()[0] as f64 / 1e18,
+                        first_action.token_out.symbol(),
+                        first_action.pool_address,
+                    );
+                    println!("    => Final Hop ({}): Output {} {}", 
+                        top_opp.swap_actions.len(),
+                        last_action.min_amount_out.as_limbs()[0] as f64 / 1e18,
+                        token_out_symbol
+                    );
+                }
             }
         }
 
@@ -208,23 +226,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             if new_pools_found {
                 println!("New pools found! Rebuilding arbitrage paths...");
-                let new_paths_2_pool = find_two_pool_cycles(
-                    &v2_pool_manager,
-                    &v3_pool_manager,
-                    &curve_pool_manager,
-                    &balancer_pool_manager,
-                );
-                let new_paths_3_pool = find_three_pool_cycles(
+                let new_paths = find_multi_hop_cycles(
                     &v2_pool_manager,
                     &v3_pool_manager,
                     &curve_pool_manager,
                     &balancer_pool_manager,
                     &token_manager,
+                    max_hops,
                 )
                 .await;
-
-                let mut new_paths = new_paths_2_pool;
-                new_paths.extend(new_paths_3_pool);
 
                 arbitrage_cache.paths.write().await.clear();
                 for path in new_paths {
