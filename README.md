@@ -6,7 +6,7 @@
 This is not a "bot"; it's the core "brain" that:
 1.  Maps the entire $\text{DEX}$ market into a unified graph.
 2.  Finds complex $\text{N}$-hop arbitrage cycles (up to 5 hops).
-3.  Calculates precise **Net Profit** by modeling gas costs, flashloan fees, and liquidity depth.
+3.  Calculates precise **Net Profit** by modelling gas costs, flashloan fees, and liquidity depth.
 
 ---
 
