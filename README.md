@@ -3,9 +3,9 @@
 
 `arbrs` is a headless solver engine for finding and optimising multi-protocol arbitrage opportunities on $\text{EVM}$ chains. It's built to handle the complexity and performance demands of modern $\text{DeFi}$.
 
-This is not a "bot"; it's the core "brain" that:
+It does the following:
 1.  Maps the entire $\text{DEX}$ market into a unified graph.
-2.  Finds complex $\text{N}$-hop arbitrage cycles (up to 5 hops).
+2.  Finds complex $\text{N}$-hop arbitrage cycles (up to "N" hops).
 3.  Calculates precise **Net Profit** by modelling gas costs, flashloan fees, and liquidity depth.
 
 ---
